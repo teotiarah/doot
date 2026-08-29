@@ -37,10 +37,15 @@ A regression input is never deleted, even after the code it exercised is rewritt
 | --- | --- | --- |
 | `fuzz_source` | arbitrary bytes as source: UTF-8 validation, line indexing, span rendering | active |
 | `fuzz_lex` | the token stream, driven to `TOK_EOF` in the default mode | active |
-| `fuzz_parse` | source to AST; the only target that reaches markup tokenization | with the parser |
+| `fuzz_parse` | source to AST; the only target that reaches markup tokenization | active |
 | `fuzz_http` | request bytes | with the server |
 | `fuzz_json` | JSON documents | with `json` |
 | `fuzz_form` | urlencoded and multipart bodies | with `form` |
 
 
 `fuzz_lex` scans in the default mode, so it reaches string interpolation but not markup: entering markup is the parser's decision ([D059](../docs/01-decisions.md#d059)), so markup tokenization is covered by `fuzz_parse`. Beyond "does not crash", it asserts that the stream terminates within a bound derived from the input length, that every span lies inside the source and is well ordered, that spans never move backwards, and that recorded comments are in range and in source order.
+
+
+`fuzz_parse` is the broadest target in the project. Beyond "does not crash" it asserts the contract `parse_unit` publishes — a unit is always returned, and a malformed input populates the sink rather than yielding a NULL tree — and then walks the resulting tree checking that every span lies inside the source and is well ordered. That last check is the valuable one: a bad span does not fault in the parser, it faults later in the diagnostic renderer, a long way from the code that produced it.
+
+It earned its place on the first run, finding an infinite loop: a token that both failed to parse and was a synchronization boundary left the cursor unmoved, so the enclosing loop spun forever. A stray `}` at the top level was enough. Both reproducers are committed under `regressions/fuzz_parse/`.

@@ -42,7 +42,7 @@ CFLAGS   := $(COMMON) $(PROFILE_FLAGS) $(DEFS)
 # objects, link lines, the format set, tidy, and the depfile include all derive
 # from this. The list stays explicit and ordered rather than a glob over src/,
 # because layer order is a deliberate property, not an alphabetical accident.
-LAYERS    := base lex
+LAYERS    := base lex parse
 
 LIB_SRCS  := $(foreach d,$(LAYERS),$(wildcard src/$(d)/*.c))
 LIB_HDRS  := $(foreach d,$(LAYERS),$(wildcard src/$(d)/*.h))
@@ -186,7 +186,12 @@ print-%:
 # Everything CI runs, in the order that fails fastest. `tidy` is included so a
 # local `make check` and a CI run cannot disagree, which is the whole point of
 # pinning the tools (D055).
-check: tools-check fmt-check tidy docs all test unity test-asan
+#
+# `release` is included for the same reason, and it was missing: CI builds both
+# profiles, `check` built only debug, and -O2 enables warnings that -O0 does not.
+# A -Wmaybe-uninitialized error reached CI green-locally, which is exactly the
+# failure mode D055 exists to prevent.
+check: tools-check fmt-check tidy docs all release test unity test-asan
 	@echo "all checks passed"
 
 clean:

@@ -346,8 +346,14 @@ These three exist and are implemented in `src/base/source.c`.
 | `DT0070` | `{else}` with no matching `{if}` or `{for}` |
 | `DT0071` | `{else if}` after `{else}` |
 | `DT0072` | unterminated markup comment |
-| `DT0073` | `...` spread is only valid inside a tag |
-| `DT0074`–`DT0079` | held |
+| `DT0073`–`DT0079` | held |
+
+Two codes reserved above turned out to be unreachable and are therefore **not registered**, per [D065](01-decisions.md#d065):
+
+- `DT0062` (closing tag with no open element) — the lexer only produces `TOK_TAG_CLOSE_START` inside element content, so a close tag with nothing open cannot be lexed.
+- `DT0073` (`...` outside a tag) — content mode lexes `...` as ordinary text and never as `TOK_ELLIPSIS`, so the spread token only exists inside a tag in the first place.
+
+Both numbers stay retired rather than being reused, because a code is permanent once assigned ([D050](01-decisions.md#d050)). The reservation was cheap; registering an explanation the compiler can never emit would not have been.
 
 ### Which well-formedness rules the parser discharges
 

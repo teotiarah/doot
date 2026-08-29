@@ -583,6 +583,16 @@ The second half is not cosmetic. `>` is in the statement-continuation set as a c
 - **Postfix `!` is removed from the continuation set.** As written it suppressed the newline after `let u = create(name)!` and joined the following line to it — breaking the most common error-handling statement in the language. Prefix `!` does not exist and `!=` is listed separately, so postfix propagation was the only `!` the entry could have meant, and it terminates statements rather than continuing them.
 - **`+=`, `-=`, `*=`, `/=`, `%=` are added.** `=` was in the set and the compound forms were not, so a line break after `total =` was legal and after `total +=` was not. Same construct, same treatment.
 - **`|` is added**, so a multi-line `match` pattern may break after the alternation bar like every other binary operator.
+- **`.` is removed from the *follow* set**, while staying in the continuation set, so a method chain breaks after the dot rather than before it. Leading-dot continuation cannot coexist with `match`, because an arm's pattern begins with a dot:
+
+  ```do
+  match status {
+    .active -> render()
+    .banned -> deny()
+  }
+  ```
+
+  The newline before `.banned` was suppressed, producing `render().banned` and silently merging two arms into one expression. That is the documented `match` example in [02-syntax.md](02-syntax.md#control-flow), so the rule as written could not parse the language's own reference. An enum pattern has no other spelling, while a chain can break after the dot or inside the parentheses — required syntax wins over optional style. *Found while implementing the parser against this rule.*
 
 Separately, `}` in the *follow* set means the final statement in a block has no `NEWLINE` after it, so `expr NEWLINE` cannot match it. **Statement end** is therefore defined as `NEWLINE` consumed, or a lookahead of `}` or end of input not consumed, everywhere the grammar writes `NEWLINE` in a statement production.
 
@@ -604,7 +614,12 @@ Worth stating plainly because the documentation implies otherwise: **`end` is no
 
 A distinct token kind per reserved word would add thirty-five enumerators that every `switch` over `token_kind` must list under `-Wswitch-enum`, to distinguish cases that are handled identically: reject with a specific message. One kind plus one table keeps the enum proportional to the grammar and puts the thirty-five messages in one reviewable place, in the same X-macro form as the diagnostic registry ([D050](#d050)).
 
-Reserved words still lex as keywords in the sense that matters — they are not `TOK_IDENT`, so they cannot be used as names.
+Reserved words lex as their own kind rather than as `TOK_IDENT`, so they cannot begin a statement or an expression. Two refinements are needed to keep the standard library expressible, and both were found by parsing the documented examples:
+
+- **A reserved word is an ordinary name in a name position** — after `.`, as a field name, as an enum variant. `auth.require`, `uuid.new`, and `chan.new` are all reserved words after a dot, so the strict reading made three documented stdlib entry points unwritable. The reservation exists so that reaching for a *foreign construct* fails clearly, and `x.require` is unambiguously a member access; enforcing it there buys nothing and costs real code.
+- **A stdlib module name wins over a keyword or reserved word in expression position.** [02-syntax.md](02-syntax.md#keywords) already declares that "all stdlib module names are predeclared identifiers, not keywords," and exactly two of the thirty-eight collide: `test`, which is keyword #27 and the assertions module (`test.eq(...)`), and `static`, which is reserved and the file-serving module. Neither word can begin an expression any other way, so there is no ambiguity to resolve — only a rule to state.
+
+*The alternative was editing the frozen thirty-five-word list, which [D042](#d042) rules out and which would have been the wrong fix anyway: the collision is not that the words are reserved, it is that reservation was being applied in positions where it has no purpose.*
 
 ### D063
 **The AST is arena-allocated tagged unions in seven node families, with intrusive singly-linked child lists. Node constructors do not fail.** · locked
@@ -616,6 +631,8 @@ Children are linked with a `next` pointer and held as `{ first, last, count }`, 
 **Constructors return a node, never an error**, because the compilation arena is built with `arena_new_fatal` and aborts on exhaustion ([D047](#d047)). The parser therefore carries no allocation-failure plumbing. This diverges from the base layer, where every allocation is checked, and the divergence is principled: `arena`, `slice`, `buf`, `source`, and `diag` are shared with the runtime, where a request arena returns `NULL` so the VM can raise `budget_exceeded` ([D005](#d005)). The AST is compiler-only and may rely on its arena's policy — which is why [D047](#d047) puts that policy on the arena rather than at the call site.
 
 *Rejected:* index-based nodes in a growable array (compact and cache-friendly, and it forfeits the arena's O(1) whole-tree release for a resize strategy the arena exists to avoid); one universal node type with a single kind enum (fewer types, and every `switch` becomes non-exhaustive over cases that cannot occur).
+
+*Consequence:* **a dotted name is one path node, not a chain of field accesses.** `db.all`, `models.user.find`, and `u.name` all parse as a single `EXPR_IDENT` holding the whole path; `EXPR_FIELD` arises only after something that is not a name, as in `f().name` or `xs[0].y`. This follows from [D030](#d030): with no imports, every non-local name is fully qualified, so the resolver has to decide where a module path ends and field access begins regardless — and it wants the whole path in one node to do that. Splitting it in the parser would only mean reassembling it later.
 
 ### D064
 **The front-end diagnostic range `DT0001`–`DT0099` is allocated in full, in advance, with sub-ranges.** · locked

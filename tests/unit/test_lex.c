@@ -379,8 +379,41 @@ static void a_follow_token_suppresses_the_newline(unit *t) {
   EXPECT_KINDS(t, "f(a\n)", TOK_IDENT, TOK_LPAREN, TOK_IDENT, TOK_RPAREN, TOK_EOF);
   EXPECT_KINDS(t, "[a\n]", TOK_LBRACKET, TOK_IDENT, TOK_RBRACKET, TOK_EOF);
   EXPECT_KINDS(t, "{a\n}", TOK_LBRACE, TOK_IDENT, TOK_RBRACE, TOK_EOF);
-  EXPECT_KINDS(t, "a\n.b", TOK_IDENT, TOK_DOT, TOK_IDENT, TOK_EOF);
   EXPECT_KINDS(t, "}\nelse {", TOK_RBRACE, TOK_KW_ELSE, TOK_LBRACE, TOK_EOF);
+}
+
+static void a_dot_continues_a_line_but_does_not_follow_one(unit *t) {
+  /* A method chain breaks *after* the dot. Leading-dot continuation had to go: a
+   * `match` arm's pattern begins with a dot, and once the newline is suppressed
+   * there is no way to tell the two apart, so
+   *
+   *     .active -> render()
+   *     .banned -> deny()
+   *
+   * became `render().banned`. Required syntax wins over optional style. */
+  EXPECT_KINDS(t, "a.\nb", TOK_IDENT, TOK_DOT, TOK_IDENT, TOK_EOF);
+  EXPECT_KINDS(t, "a\n.b", TOK_IDENT, TOK_NEWLINE, TOK_DOT, TOK_IDENT, TOK_EOF);
+}
+
+static void a_match_arm_pattern_keeps_its_own_line(unit *t) {
+  EXPECT_KINDS(t, "match s {\n  .a -> f()\n  .b -> g()\n}", TOK_KW_MATCH, TOK_IDENT, TOK_LBRACE,
+               TOK_DOT, TOK_IDENT, TOK_ARROW, TOK_IDENT, TOK_LPAREN, TOK_RPAREN, TOK_NEWLINE,
+               TOK_DOT, TOK_IDENT, TOK_ARROW, TOK_IDENT, TOK_LPAREN, TOK_RPAREN, TOK_RBRACE,
+               TOK_EOF);
+}
+
+static void a_closing_bracket_does_not_suppress_the_newline_after_it(unit *t) {
+  /* A closing bracket is a follow token, never a continuation one. Treating it as
+   * both let `f()` swallow its own statement terminator and join the next line --
+   * the same shape of defect D060 corrected for postfix `!`. */
+  EXPECT_KINDS(t, "f()\ng()", TOK_IDENT, TOK_LPAREN, TOK_RPAREN, TOK_NEWLINE, TOK_IDENT, TOK_LPAREN,
+               TOK_RPAREN, TOK_EOF);
+  EXPECT_KINDS(t, "let a = [1]\nlet b = 2", TOK_KW_LET, TOK_IDENT, TOK_EQ, TOK_LBRACKET, TOK_INT,
+               TOK_RBRACKET, TOK_NEWLINE, TOK_KW_LET, TOK_IDENT, TOK_EQ, TOK_INT, TOK_EOF);
+  /* A `}` that closes a block still terminates the line after it. */
+  EXPECT_KINDS(t, "fn f() {}\nfn g() {}", TOK_KW_FN, TOK_IDENT, TOK_LPAREN, TOK_RPAREN, TOK_LBRACE,
+               TOK_RBRACE, TOK_NEWLINE, TOK_KW_FN, TOK_IDENT, TOK_LPAREN, TOK_RPAREN, TOK_LBRACE,
+               TOK_RBRACE, TOK_EOF);
 }
 
 static void comments_are_not_significant_for_line_structure(unit *t) {
@@ -784,6 +817,11 @@ static const unit_case cases[] = {
     {"a_pattern_alternation_bar_continues", a_pattern_alternation_bar_continues},
     {"postfix_bang_does_not_suppress_the_newline", postfix_bang_does_not_suppress_the_newline},
     {"a_follow_token_suppresses_the_newline", a_follow_token_suppresses_the_newline},
+    {"a_closing_bracket_does_not_suppress_the_newline_after_it",
+     a_closing_bracket_does_not_suppress_the_newline_after_it},
+    {"a_dot_continues_a_line_but_does_not_follow_one",
+     a_dot_continues_a_line_but_does_not_follow_one},
+    {"a_match_arm_pattern_keeps_its_own_line", a_match_arm_pattern_keeps_its_own_line},
     {"comments_are_not_significant_for_line_structure",
      comments_are_not_significant_for_line_structure},
     {"the_newline_span_covers_the_whole_run", the_newline_span_covers_the_whole_run},

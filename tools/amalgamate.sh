@@ -27,6 +27,8 @@ src/base/source.c
 src/base/diag.c
 src/lex/token.c
 src/lex/lex.c
+src/parse/ast.c
+src/parse/parse.c
 src/cli/main.c
 "
 

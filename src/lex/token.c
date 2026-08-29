@@ -190,17 +190,30 @@ static unsigned token_flags(token_kind kind) {
   case TOK_KW_NOT:
     return TF_CONTINUATION;
 
-  /* Follow only. */
+  /* Follow only. A closing bracket permits a break *before* it, so a multi-line
+   * call or literal works -- but it must not suppress the newline *after* it, or
+   * `f()` would swallow its own statement terminator and join the next line. */
   case TOK_KW_ELSE:
-    return TF_FOLLOW;
-
-  /* Both: a closing bracket ends the line before it and may be preceded by a
-   * break, and `.` chains in either direction. */
   case TOK_RPAREN:
   case TOK_RBRACKET:
   case TOK_RBRACE:
+    return TF_FOLLOW;
+
+  /* `.` continues a line but does not follow one, so a method chain breaks *after*
+   * the dot rather than before it.
+   *
+   * Leading-dot continuation had to go, because a `match` arm's pattern begins with
+   * a dot and there is no way to tell the two apart once the newline is gone:
+   *
+   *     match status {
+   *       .active -> render()
+   *       .banned -> deny()      <- joins to `render().banned` if `.` follows
+   *     }
+   *
+   * Required syntax wins over optional style: an enum pattern cannot be written any
+   * other way, while a chain can break after the dot or inside the parentheses. */
   case TOK_DOT:
-    return TF_CONTINUATION | TF_FOLLOW;
+    return TF_CONTINUATION;
 
   /* Neither. */
   case TOK_EOF:
