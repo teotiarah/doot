@@ -25,6 +25,8 @@ src/base/slice.c
 src/base/buf.c
 src/base/source.c
 src/base/diag.c
+src/lex/token.c
+src/lex/lex.c
 src/cli/main.c
 "
 

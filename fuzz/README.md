@@ -36,8 +36,11 @@ A regression input is never deleted, even after the code it exercised is rewritt
 | Target | Input | Status |
 | --- | --- | --- |
 | `fuzz_source` | arbitrary bytes as source: UTF-8 validation, line indexing, span rendering | active |
-| `fuzz_lex` | token stream | with the lexer |
-| `fuzz_parse` | source to AST | with the parser |
+| `fuzz_lex` | the token stream, driven to `TOK_EOF` in the default mode | active |
+| `fuzz_parse` | source to AST; the only target that reaches markup tokenization | with the parser |
 | `fuzz_http` | request bytes | with the server |
 | `fuzz_json` | JSON documents | with `json` |
 | `fuzz_form` | urlencoded and multipart bodies | with `form` |
+
+
+`fuzz_lex` scans in the default mode, so it reaches string interpolation but not markup: entering markup is the parser's decision ([D059](../docs/01-decisions.md#d059)), so markup tokenization is covered by `fuzz_parse`. Beyond "does not crash", it asserts that the stream terminates within a bound derived from the input length, that every span lies inside the source and is well ordered, that spans never move backwards, and that recorded comments are in range and in source order.
