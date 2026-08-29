@@ -62,12 +62,21 @@ jobs:
       - uses: actions/checkout@v4
       - run: CC=clang make test-asan
 
+  # Both style jobs install the versions pinned in the Makefile rather than
+  # whatever the runner image ships (D055). `make tools-check` then verifies the
+  # installed versions match, so a drifted runner fails with a clear message
+  # instead of a diagnostic nobody can reproduce locally.
   fmt:
     name: fmt-check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: clang-format --version
+      - name: install pinned clang-format and clang-tidy
+        run: |
+          pip install --quiet \
+            "clang-format==$(make -s print-CLANG_FORMAT_VERSION)" \
+            "clang-tidy==$(make -s print-CLANG_TIDY_VERSION)"
+      - run: make tools-check
       - run: make fmt-check
 
   tidy:
@@ -75,7 +84,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: clang-tidy --version
+      - name: install pinned clang-format and clang-tidy
+        run: |
+          pip install --quiet \
+            "clang-format==$(make -s print-CLANG_FORMAT_VERSION)" \
+            "clang-tidy==$(make -s print-CLANG_TIDY_VERSION)"
+      - run: make tools-check
       - run: make tidy
 
   docs:

@@ -20,6 +20,7 @@ make fuzz             # build libFuzzer targets
 make fuzz-smoke       # short fuzz run + every committed regression
 make fmt / fmt-check  # clang-format
 make tidy             # clang-tidy
+make tools-check      # verify the pinned clang-format/clang-tidy versions
 make docs             # cross-references, diagnostic codes, no TODO markers
 make check            # everything CI runs, ordered to fail fastest
 ```
@@ -187,9 +188,21 @@ Every one of these must pass before merge ([D051](01-decisions.md#d051)):
 | `fmt-check` | `clang-format` clean |
 | `tidy` | curated `clang-tidy` checks |
 | `fuzz-smoke` | 60 s per target, plus all committed regressions |
-| `docs` | no broken cross-references; every diagnostic code has a spec test |
+| `docs` | no broken cross-references; every diagnostic code documented and tested; no vendored tree drifted |
 
 Linux only through v0.4, then macOS and Windows runners join at v0.5 ([07-roadmap.md](07-roadmap.md#v05--everywhere)).
+
+### The tools are pinned
+
+`clang-format` and `clang-tidy` versions live in the Makefile; `make tools-check` verifies them and CI installs exactly those versions rather than using whatever the runner image ships ([D055](01-decisions.md#d055)).
+
+```sh
+pip install clang-format==22.1.8 clang-tidy==22.1.8
+```
+
+This exists because of a real failure: the `tidy` gate passed locally and failed in CI on the first push, and the cause was the host's system headers rather than the code. **A gate whose result depends on the machine it runs on is worse than no gate**, because it teaches you to read red as noise — which is how a genuine failure eventually gets waved through. `make check` includes `tidy` for the same reason: a local run and a CI run must reach the same verdict.
+
+Two `clang-tidy` checks are disabled, both in `.clang-tidy` with their reasoning written out beside them, never suppressed inline ([D053](01-decisions.md#d053)). The rule applied when deciding: **a check that correct code cannot satisfy is not a check.** Each disabled entry records the residual risk accepted and the condition under which it comes back.
 
 ---
 

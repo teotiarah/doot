@@ -56,8 +56,18 @@ FUZZ_FLAGS   := $(STD) -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-
 FMT_FILES := $(LIB_SRCS) $(CLI_SRCS) $(TEST_SRCS) $(FUZZ_SRCS) \
              $(wildcard src/base/*.h) $(wildcard src/cli/*.h) $(wildcard tests/unit/*.h)
 
+# Style and analysis tools are pinned (D055). A formatter or analyzer that
+# differs between a developer's machine and CI produces a gate that passes
+# locally and fails remotely, which is worse than having no gate. Install the
+# pinned versions with:
+#   pip install clang-format==$(CLANG_FORMAT_VERSION) clang-tidy==$(CLANG_TIDY_VERSION)
+CLANG_FORMAT_VERSION := 22.1.8
+CLANG_TIDY_VERSION   := 22.1.8
+CLANG_FORMAT ?= clang-format
+CLANG_TIDY   ?= clang-tidy
+
 .PHONY: all release debug asan test test-asan unity fuzz fuzz-smoke fmt fmt-check tidy \
-        docs check clean help
+        tools-check docs check clean help
 
 all: $(DOOT)
 
@@ -130,20 +140,45 @@ fuzz-smoke: fuzz
 
 # ---- style and docs ------------------------------------------------------
 
-fmt:
-	clang-format -i $(FMT_FILES)
+# Fails loudly on a version mismatch rather than letting the difference surface
+# as a CI failure nobody can reproduce.
+tools-check:
+	@ok=1; \
+	have=$$($(CLANG_FORMAT) --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1); \
+	if [ "$$have" != "$(CLANG_FORMAT_VERSION)" ]; then \
+	  echo "clang-format is $${have:-missing}, pinned at $(CLANG_FORMAT_VERSION)" >&2; ok=0; fi; \
+	have=$$($(CLANG_TIDY) --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1); \
+	if [ "$$have" != "$(CLANG_TIDY_VERSION)" ]; then \
+	  echo "clang-tidy is $${have:-missing}, pinned at $(CLANG_TIDY_VERSION)" >&2; ok=0; fi; \
+	if [ "$$ok" -eq 0 ]; then \
+	  echo "" >&2; \
+	  echo "install the pinned tools:" >&2; \
+	  echo "  pip install clang-format==$(CLANG_FORMAT_VERSION) clang-tidy==$(CLANG_TIDY_VERSION)" >&2; \
+	  exit 1; \
+	fi; \
+	echo "tools ok: clang-format $(CLANG_FORMAT_VERSION), clang-tidy $(CLANG_TIDY_VERSION)"
 
-fmt-check:
-	clang-format --dry-run --Werror $(FMT_FILES)
+fmt: tools-check
+	$(CLANG_FORMAT) -i $(FMT_FILES)
 
-tidy:
-	clang-tidy $(LIB_SRCS) $(CLI_SRCS) -- $(STD) $(DEFS)
+fmt-check: tools-check
+	$(CLANG_FORMAT) --dry-run --Werror $(FMT_FILES)
+
+tidy: tools-check
+	$(CLANG_TIDY) $(LIB_SRCS) $(CLI_SRCS) -- $(STD) $(DEFS)
 
 docs:
 	tools/check-docs.sh
 
-# Everything CI runs, in the order that fails fastest.
-check: fmt-check docs all test unity test-asan
+# Lets CI read a pinned version out of this file instead of duplicating it, so
+# the pin has exactly one home: `make -s print-CLANG_TIDY_VERSION`.
+print-%:
+	@echo "$($*)"
+
+# Everything CI runs, in the order that fails fastest. `tidy` is included so a
+# local `make check` and a CI run cannot disagree, which is the whole point of
+# pinning the tools (D055).
+check: tools-check fmt-check tidy docs all test unity test-asan
 	@echo "all checks passed"
 
 clean:
@@ -161,6 +196,7 @@ help:
 	@echo "  make fmt           format sources"
 	@echo "  make fmt-check     verify formatting"
 	@echo "  make tidy          clang-tidy"
+	@echo "  make tools-check   verify pinned clang-format/clang-tidy versions"
 	@echo "  make docs          check documentation cross-references"
 	@echo "  make check         everything CI runs"
 	@echo "  make clean         remove build/"

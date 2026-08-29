@@ -117,17 +117,23 @@ bool buf_printf(buf *b, const char *fmt, ...) {
     return false;
   }
 
-  va_start(probe, fmt);
+  /* One va_start, with va_copy for the sizing pass: both passes then provably
+   * see identical arguments, which two separate va_start calls do not guarantee
+   * as clearly to a reader. */
+  va_start(ap, fmt);
+  va_copy(probe, ap);
   n = vsnprintf(NULL, 0, fmt, probe);
   va_end(probe);
+
   if (n < 0) {
+    va_end(ap);
     DOOT_FATAL("vsnprintf failed formatting \"%s\"", fmt);
   }
   if (!buf_reserve(b, (size_t)n)) {
+    va_end(ap);
     return false;
   }
 
-  va_start(ap, fmt);
   (void)vsnprintf(b->data + b->len, (size_t)n + 1u, fmt, ap);
   va_end(ap);
   b->len += (size_t)n;

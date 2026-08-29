@@ -513,3 +513,17 @@ No placeholder implementations, no unimplemented branches, no features merged be
 The CLI grows one working command at a time. `doot check` does not appear until it genuinely checks, because a command that half-works trains users to distrust the tool and hides the real state of the project from its own author — which, on a project attempted three times, is the specific failure mode most worth engineering against.
 
 Also the eighth item in the definition of done ([09-engineering.md](09-engineering.md#definition-of-done)), which is where it gets enforced per subsystem.
+
+
+### D055
+**Style and analysis tool versions are pinned, verified before use, and installed from the pin in CI.** · locked
+
+`clang-format` and `clang-tidy` versions live in the Makefile, `make tools-check` fails on a mismatch, and CI installs exactly those versions rather than using whatever the runner image ships.
+
+Prompted by a concrete failure: the `tidy` gate passed locally and failed in CI on the first push. The cause was not the code but the environment — `clang-analyzer-valist.Uninitialized` fired on textbook-correct `va_start`/`vfprintf`/`va_end` code under one host's system headers and not another's, alongside several thousand suppressed analyzer warnings from those same headers.
+
+**A gate whose result depends on the machine it runs on is worse than no gate**, because it trains you to treat red as noise, which is precisely how a real failure gets waved through. Pinning restores the property that makes a gate worth having: `make check` locally and CI reach the same verdict. `make check` therefore includes `tidy`, so the two cannot silently diverge again.
+
+Corollary for check selection: **a check that cannot be satisfied by correct code is disabled in `.clang-tidy` with its reasoning written out, not suppressed inline** ([D053](#d053)) and not left failing. Two are currently disabled, each with the argument recorded in that file, including the residual risk accepted and the condition under which it would be re-enabled.
+
+Upgrading a pinned version is a deliberate change: bump the pin, run `make fmt`, review the resulting diff, and commit it as its own change rather than mixed into unrelated work.
