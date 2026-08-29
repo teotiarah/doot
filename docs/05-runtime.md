@@ -20,6 +20,8 @@ source (.do)
 
 No parser generator, no code generator, no build-time scripting language. The compiler is C, and a C99 compiler plus the two vendored dependencies builds the entire project ([D035](01-decisions.md#d035)).
 
+The first three stages — lexer, parser, and the AST they produce — are specified in detail in [10-frontend.md](10-frontend.md), together with the front-end diagnostic allocation and the specification-test runner.
+
 Compilation is whole-program: there are no separate compilation units to link, because there are no external dependencies to resolve ([D029](01-decisions.md#d029)). This is what makes cross-module inference, exhaustive route checking, and SQL validation possible in one pass, and it is only affordable because project sizes are bounded by the target use case.
 
 ---

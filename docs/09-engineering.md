@@ -73,7 +73,7 @@ Allocation failure policy is explicit per arena:
 | compiler | fatal — abort with a diagnostic; a compiler that cannot allocate cannot proceed |
 | request | returns `NULL`, which the VM converts to a `budget_exceeded` fault ([D005](01-decisions.md#d005)) |
 
-The distinction is set with `arena_set_fatal_on_oom` at construction, so no call site has to remember which kind it holds.
+The distinction is chosen at construction — `arena_new` returns `NULL` on exhaustion, `arena_new_fatal` aborts — so no call site has to remember which kind it holds. This is what lets the AST's node constructors return a node and never an error ([D063](01-decisions.md#d063)), while the base layer, which the runtime also uses, checks every allocation.
 
 ## Assertions are always on
 
@@ -108,6 +108,8 @@ Scope: the base layer (arena, buffers, slices, source mapping, diagnostics), and
 ### 2. Spec tests — `tests/spec/`
 
 **The executable form of the specification, and the primary suite.** A `.do` file, its expectations declared in comments, and a runner that drives the real `doot` binary.
+
+The suite arrives with **`doot fmt`**, at the parser milestone — not with the lexer, as this document first said. A spec test drives a real command, and no command that consumes only a lexer exists or may exist ([D054](01-decisions.md#d054)). `doot fmt` is the first command that is complete rather than partial, because formatting needs the lexer, the parser, and a printer and nothing else. The runner's design is [D066](01-decisions.md#d066); the sequencing argument is [D067](01-decisions.md#d067).
 
 ```do
 // doot-spec: check
@@ -161,8 +163,8 @@ libFuzzer targets on every component that consumes untrusted bytes. This is not 
 | Target | Consumes | From |
 | --- | --- | --- |
 | `fuzz_source` | arbitrary bytes as source: UTF-8 validation, line indexing, span rendering | now |
-| `fuzz_lex` | token stream | lexer |
-| `fuzz_parse` | full source → AST, must not crash on any input | parser |
+| `fuzz_lex` | token stream, driven to `TOK_EOF` in the default mode | lexer |
+| `fuzz_parse` | full source → AST, must not crash on any input; the only target that reaches markup tokenization | parser |
 | `fuzz_http` | request bytes | server |
 | `fuzz_json` | JSON documents | `json` |
 | `fuzz_form` | urlencoded and multipart bodies | `form` |
@@ -229,10 +231,12 @@ Makefile  .clang-format  .clang-tidy  .github/workflows/ci.yml
 src/
   base/               plat, assert, arena, slice, buf, source, diag
   cli/                command dispatch
-  (lex, parse, sema, vm, http, db … as they land)
+  lex/                token, lexer                   (10-frontend.md)
+  parse/              AST, parser, printer           (10-frontend.md)
+  (sema, vm, http, db … as they land)
 tests/
   unit/               C unit tests + harness
-  spec/               .do specification tests        (with the lexer)
+  spec/               .do specification tests        (with `doot fmt`)
   wire/               raw-socket HTTP tests          (with the server)
 fuzz/
   fuzz_source.c  corpus/  regressions/

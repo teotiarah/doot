@@ -10,9 +10,27 @@ Normative reference for the doot v0.1 language. Notation: `|` alternation, `?` o
 
 doot is **newline-terminated, not semicolon-terminated**, and whitespace is otherwise insignificant.
 
-A `NEWLINE` token terminates a statement unless the preceding token is one of `( [ { , . + - * / % = == != < > <= >= and or not -> => : !` or the following token is one of `) ] } . else`. This means an expression may break across lines after any operator or opening bracket without a continuation marker, and a `} else {` chain stays on one logical statement.
+A `NEWLINE` token terminates a statement unless the **preceding** token is a continuation token:
 
-Inside markup literals, newlines are content, not terminators.
+```
+( [ { , . : -> => = += -= *= /= %= == != < <= > >= + - * / % | and or not
+```
+
+or the **following** token is a follow token:
+
+```
+) ] } . else
+```
+
+This means an expression may break across lines after any operator or opening bracket without a continuation marker, and a `} else {` chain stays on one logical statement.
+
+A run of consecutive newlines produces at most one `NEWLINE`, whose span covers the whole run so that `doot fmt` can recover the author's blank lines. Comments are not significant for this rule: they are neither the preceding nor the following token.
+
+**Statement end** is `NEWLINE` consumed, or a lookahead of `}` or end of input, neither consumed. The last statement in a block has no `NEWLINE` after it, because `}` is a follow token — so every `NEWLINE` written in a statement production below is satisfied by any of the three.
+
+Inside markup literals, newlines are content, not terminators. Inside a markup tag they are insignificant whitespace, so attributes may wrap.
+
+Three entries differ from this document's first version, corrected under [D060](01-decisions.md#d060): postfix `!` is **not** a continuation token, because it ended `let u = create(name)!` and swallowed the newline; the compound assignments are continuation tokens, because `=` is one and they are the same construct; and `|` is one, so a multi-line `match` pattern breaks like any other binary operator. `<` and `>` are unambiguous here because markup delimiters are distinct token kinds and never the comparison operators ([D059](01-decisions.md#d059)).
 
 ### Comments
 
@@ -42,7 +60,7 @@ METHOD       := "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS"
 
 `STR` is UTF-8 and supports interpolation. `RAW_STR` (backticks) supports neither escapes nor interpolation, and exists for SQL and other embedded text.
 
-`METHOD` tokens are contextual: they are recognized as HTTP methods only immediately after `route` or `stream`, and are ordinary identifiers elsewhere.
+`METHOD` tokens are contextual: they are recognized as HTTP methods only immediately after `route` or `stream`, and are ordinary identifiers elsewhere. They lex as identifiers and are matched by text in the parser ([D061](01-decisions.md#d061)), as is `end` in a markup control block — which is likewise not a keyword.
 
 ### Keywords
 
@@ -282,7 +300,7 @@ A `<form method="post">` element gains a hidden CSRF token automatically ([D028]
 
 ## Well-formedness rules
 
-Enforced after parsing, in the resolver and typechecker. Each has an assigned diagnostic code.
+Each has an assigned diagnostic code. Rules **1, 9, 10, 11, and 12** need only syntactic context and are enforced by the parser, with codes allocated in [10-frontend.md](10-frontend.md#which-well-formedness-rules-the-parser-discharges); the rest need names, types, the route table, or control-flow analysis and are enforced after parsing, in the resolver and typechecker ([D064](01-decisions.md#d064)).
 
 1. A top-level binding must be `let`, never `var`.
 2. An assignment target must resolve to a `var` local; parameters and `let` bindings are immutable, transitively.

@@ -6,7 +6,7 @@ A request comes in. HTML goes out. That is the whole model.
 
 doot exists because building a small-to-mid-size web application currently requires assembling a stack — a runtime, a framework, a package tree, a database, a reverse proxy, a container, a deployment platform — none of which the application needed. For the 0 to 50,000 user range, a single box with SQLite is not a compromise. It is the correct architecture, and every distributed-systems concept imported into it is pure cost.
 
-> **Status: design.** No implementation yet. The documents below are the specification being settled before any code is written. Decisions in [`docs/01-decisions.md`](docs/01-decisions.md) are locked and do not get revisited.
+> **Status: early implementation.** The base layer, build, and CI gates are in place; the compiler is not started. The documents below are the specification, settled before the code that implements it. Decisions in [`docs/01-decisions.md`](docs/01-decisions.md) are locked and do not get revisited.
 
 ```do
 type Msg {
@@ -95,6 +95,7 @@ The binary currently supports `doot codes` and `doot explain <code>`. Commands a
 | [07-roadmap.md](docs/07-roadmap.md) | v0.1 through v1.0, and the release model |
 | [08-boundaries.md](docs/08-boundaries.md) | where the runtime ends and the panel begins |
 | [09-engineering.md](docs/09-engineering.md) | build, C subset, testing strategy, fuzzing, CI gates, vendoring |
+| [10-frontend.md](docs/10-frontend.md) | lexer, parser, AST, front-end diagnostics, spec-test runner |
 
 **Start with [00-vision.md](docs/00-vision.md), then [02-syntax.md](docs/02-syntax.md).**
 

@@ -18,7 +18,7 @@ The practical consequence for sequencing: **v0.1 must be small enough to finish 
 
 The smallest thing that is a coherent product: a complete language and a real application. The chat example in [02-syntax.md](02-syntax.md) runs, minus its `stream` handler.
 
-**Language, complete and final.** All 31 keywords, the full grammar in [03-grammar.md](03-grammar.md), the typechecker, structs, methods, tag-only enums, `match`, `with`, lambdas, `defer`.
+**Language, complete and final.** All 31 keywords, the full grammar in [03-grammar.md](03-grammar.md), the typechecker, structs, methods, tag-only enums, `match`, `with`, lambdas, `defer`. The front end — lexer, parser, AST — is specified in [10-frontend.md](10-frontend.md) and lands first, in the order set by [D067](01-decisions.md#d067).
 
 **The error model, complete.** `!` propagation, `else` coalescing, the universal `Error` type, faults with task-level containment ([D012](01-decisions.md#d012)–[D014](01-decisions.md#d014)).
 

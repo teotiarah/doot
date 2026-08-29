@@ -527,3 +527,130 @@ Prompted by a concrete failure: the `tidy` gate passed locally and failed in CI 
 Corollary for check selection: **a check that cannot be satisfied by correct code is disabled in `.clang-tidy` with its reasoning written out, not suppressed inline** ([D053](#d053)) and not left failing. Two are currently disabled, each with the argument recorded in that file, including the residual risk accepted and the condition under which it would be re-enabled.
 
 Upgrading a pinned version is a deliberate change: bump the pin, run `make fmt`, review the resulting diff, and commit it as its own change rather than mixed into unrelated work.
+
+
+---
+
+## Front end
+
+The lexer, the parser, and the AST, argued here and specified in [10-frontend.md](10-frontend.md). These are the decisions that had to be settled before any compiler code could be written, and they are settled in one pass so that the implementation never has to stop and decide something.
+
+### D056
+**The lexer is pull-based, with an explicit mode stack. The parser drives it one token at a time.** · locked
+
+`lex_next` / `lex_peek` over a `lexer` context passed explicitly, with a stack of scanning modes (`LEX_NORMAL`, `LEX_STR`, `LEX_MARKUP_TAG`, `LEX_MARKUP_CONTENT`) bounded at 64 entries.
+
+This is forced rather than chosen. Deciding whether `<` opens a markup literal requires knowing whether the parser is in expression position ([D059](#d059)), and a batch lexer that produces a finished token array before parsing begins has no access to that. Once the lexer must interleave with the parser for markup, a single pull-based entry point is simpler than a batch path plus an on-demand path for markup, and it removes the question of which one is authoritative.
+
+Exceeding the mode-stack bound is a diagnostic (`DT0022`), not an assertion. Nesting depth is reachable from untrusted input on any endpoint that compiles source, so it is user input, and [D048](#d048) reserves assertions for invariant violations in doot itself.
+
+*Rejected:* a batch lexer producing a token array, with the parser re-lexing markup regions on demand — two lexer entry points over the same bytes, and the re-lex has to reproduce the mode state the first pass discarded; lexing markup as one opaque token and parsing its interior separately, which is the same problem with an extra representation.
+
+### D057
+**A token carries a kind and a span, and nothing else. Literal values are decoded by the parser.** · locked
+
+`token` is `{ token_kind kind; span at; }` — twelve bytes. No decoded integer, no unescaped string.
+
+The lexer therefore **allocates nothing** and touches the arena only to report a diagnostic, which removes allocation failure from every lexer path and makes `fuzz_lex` a pure function of its input. The token stream is reproducible byte-for-byte, which is what allows the spec suite to assert on spans exactly rather than approximately ([D066](#d066)). And source text keeps one representation — a `slice` into `source_text` — instead of two that can disagree.
+
+The re-scan is not free, but decoding happens once per literal either way; the only question is which stage does it.
+
+*Rejected:* a value union in the token (an `int64_t`, a decoded `slice`), which is the conventional design and costs the three properties above to save a second pass over bytes already in cache.
+
+### D058
+**String literals lex as a token sequence, not as a single token, and non-interpolated strings use the same shape.** · locked
+
+`STR_START`, `STR_TEXT`, `INTERP_START` … `INTERP_END`, `STR_END`. Interpolation makes a string literal structurally a tree, so a single token cannot represent one without the parser re-lexing its interior — which is [D056](#d056)'s rejected alternative in another place.
+
+`"hello"` gets the full three-token shape rather than a shortcut. Two extra tokens buys a parser with one case instead of two, which is [goal 1](00-vision.md#the-nine-goals) applied to the implementation rather than only to the language.
+
+`STR_TEXT` spans raw bytes with escapes unresolved; the parser resolves them and reports `DT0014`–`DT0016` at the escape's own span rather than at the start of the literal. Raw strings stay a single token, because backticks admit neither escapes nor interpolation and so have no interior.
+
+### D059
+**Markup recognition is split at the lexical seam: the lexer decides tag shape, the parser decides expression position. Markup delimiters are distinct token kinds, never operator kinds.** · locked
+
+The `<` rule in [03-grammar.md](03-grammar.md#disambiguation) has three conditions. Conditions 2 and 3 — immediately followed by a letter, `_`, or `/`, forming a valid tag name followed by whitespace, `>`, `/`, or `=` — are decidable from bytes alone, so the lexer checks them and emits `TOK_MARKUP_START` or `TOK_LT`. Condition 1 — expression position — is the parser's, and it resolves it by position: in expression position `TOK_MARKUP_START` opens a literal, in operator position it reads as less-than. The token spans only the `<`, so that reinterpretation needs no re-lexing.
+
+The second half is not cosmetic. `>` is in the statement-continuation set as a comparison operator, so if a markup tag's closing `>` were `TOK_GT`, then `return <p>hi</p>` would end on a continuation token and swallow its own statement terminator. Distinct kinds for `TOK_TAG_END`, `TOK_TAG_SELF_CLOSE`, `TOK_MARKUP_START`, and the rest make the operator entries in that set unambiguous by construction rather than by a special case in the line-structure rule.
+
+*Consequence:* element nesting is tracked by the parser, which is already building the tree, so `</>` closing the most recent open element and the mismatch diagnostics `DT0060`–`DT0062` all sit where the open-element stack lives.
+
+### D060
+**Three corrections to the statement-continuation set, and a three-way definition of statement end.** · locked
+
+*This corrects [03-grammar.md](03-grammar.md#line-structure) rather than reversing a decision: the rule's intent is unchanged and the corrections are what the intent requires.*
+
+- **Postfix `!` is removed from the continuation set.** As written it suppressed the newline after `let u = create(name)!` and joined the following line to it — breaking the most common error-handling statement in the language. Prefix `!` does not exist and `!=` is listed separately, so postfix propagation was the only `!` the entry could have meant, and it terminates statements rather than continuing them.
+- **`+=`, `-=`, `*=`, `/=`, `%=` are added.** `=` was in the set and the compound forms were not, so a line break after `total =` was legal and after `total +=` was not. Same construct, same treatment.
+- **`|` is added**, so a multi-line `match` pattern may break after the alternation bar like every other binary operator.
+
+Separately, `}` in the *follow* set means the final statement in a block has no `NEWLINE` after it, so `expr NEWLINE` cannot match it. **Statement end** is therefore defined as `NEWLINE` consumed, or a lookahead of `}` or end of input not consumed, everywhere the grammar writes `NEWLINE` in a statement production.
+
+*Consequence:* the emitted `NEWLINE` spans the entire run of consecutive newlines it replaces, so `doot fmt` recovers the author's blank lines by counting `\n` within the span. No extra token field, and the span is accurate rather than nominal.
+
+### D061
+**Contextual words lex as identifiers and are matched by text in the parser.** · locked
+
+Two sets: the HTTP methods (`GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS`), recognized only immediately after `route` or `stream`; and `end`, which closes a markup control block.
+
+The lexer stays context-free, and the parser — the only component that knows the context — produces a specific diagnostic instead of a bare parse failure: "expected an HTTP method after `route`, found `Get`."
+
+Worth stating plainly because the documentation implies otherwise: **`end` is not one of the thirty-one keywords.** [D022](#d022) says markup control flow reuses statement keywords, and `if`, `else`, and `for` do, but `end` has no statement equivalent. It is a contextual word in markup control position, consuming no keyword budget, exactly as type names and stdlib module names are predeclared identifiers rather than keywords.
+
+### D062
+**All thirty-five reserved words share one token kind and one diagnostic code, with per-word messages from a table.** · locked
+
+`TOK_RESERVED`, `DT0023`, and an X-macro table mapping each word to the message naming its doot equivalent — `import` to [D030](#d030), `await` to [D006](#d006), `class` to [D016](#d016), and so on.
+
+A distinct token kind per reserved word would add thirty-five enumerators that every `switch` over `token_kind` must list under `-Wswitch-enum`, to distinguish cases that are handled identically: reject with a specific message. One kind plus one table keeps the enum proportional to the grammar and puts the thirty-five messages in one reviewable place, in the same X-macro form as the diagnostic registry ([D050](#d050)).
+
+Reserved words still lex as keywords in the sense that matters — they are not `TOK_IDENT`, so they cannot be used as names.
+
+### D063
+**The AST is arena-allocated tagged unions in seven node families, with intrusive singly-linked child lists. Node constructors do not fail.** · locked
+
+Families: `decl`, `stmt`, `expr`, `type_ref`, `pattern`, `markup_node`, `attr`. Separate families rather than one universal node, so a function taking an `expr *` cannot receive a statement and each family's `switch` is exhaustive over only what it can contain.
+
+Children are linked with a `next` pointer and held as `{ first, last, count }`, the shape the base layer already uses for `diag` and `diag_label`. This follows from the allocator: `arena_extend` grows only the arena's most recent allocation, so a contiguous array of children cannot be built while those children are themselves being allocated. A linked list appends in O(1) with no resize and no second pass, every consumer walks it in order, and `count` is there when a count is wanted.
+
+**Constructors return a node, never an error**, because the compilation arena is built with `arena_new_fatal` and aborts on exhaustion ([D047](#d047)). The parser therefore carries no allocation-failure plumbing. This diverges from the base layer, where every allocation is checked, and the divergence is principled: `arena`, `slice`, `buf`, `source`, and `diag` are shared with the runtime, where a request arena returns `NULL` so the VM can raise `budget_exceeded` ([D005](#d005)). The AST is compiler-only and may rely on its arena's policy — which is why [D047](#d047) puts that policy on the arena rather than at the call site.
+
+*Rejected:* index-based nodes in a growable array (compact and cache-friendly, and it forfeits the arena's O(1) whole-tree release for a resize strategy the arena exists to avoid); one universal node type with a single kind enum (fewer types, and every `switch` becomes non-exhaustive over cases that cannot occur).
+
+### D064
+**The front-end diagnostic range `DT0001`–`DT0099` is allocated in full, in advance, with sub-ranges.** · locked
+
+`DT0001`–`DT0009` source intake, `DT0010`–`DT0029` lexical, `DT0030`–`DT0059` syntactic, `DT0060`–`DT0079` markup syntax, `DT0080`–`DT0099` held. The complete table is in [10-frontend.md](10-frontend.md#front-end-diagnostics).
+
+Codes are permanent once assigned and never renumbered ([D050](#d050)), which makes the numbering a one-way decision and therefore worth making deliberately rather than incrementally. Allocating the range up front means a code is chosen by where it belongs rather than by what was free that week, and it removes the registry as a coordination point between workstreams that would otherwise both reach for the next integer.
+
+*Consequence:* five of the sixteen well-formedness rules in [03-grammar.md](03-grammar.md#well-formedness-rules) are reassigned from the resolver to the parser, because they need only syntactic context — whether the parser is inside a loop, a method, or a stream body. The parser has the tightest span and already tracks that context, and the resolver then carries no state whose only purpose is producing an error the parser could already see.
+
+### D065
+**A diagnostic code enters `diag_codes.h` in the same change as the test that produces it, never earlier.** · locked
+
+[D064](#d064) reserves numbers in the documentation; this decides when a row appears in the registry.
+
+The gate forces it: `tools/check-docs.sh` fails when a registered code is not produced by any test, which is [D049](#d049) made mechanical. Pre-populating forty rows would break the `docs` gate on the first commit — and it would be a stub table, forty codes that `doot explain` describes in full and the compiler never emits, which is what [D054](#d054) exists to prevent.
+
+The reservation is what keeps two workstreams from both taking `DT0031`. The gate is what keeps the registry honest. Both are needed, and they are different mechanisms.
+
+### D066
+**The spec runner is a C test binary with its own narrow JSON reader, and it never depends on the `json` stdlib module.** · locked
+
+`tests/spec/spec_runner.c`, built as `doot_spec` beside `doot_test`, outside the amalgamation. It discovers `tests/spec/**/*.do`, reads the directives from [09-engineering.md](09-engineering.md#2-spec-tests--testsspec), invokes the real `doot` binary once per file, and compares structured output exactly — in both directions, so an unexpected diagnostic fails the file just as a missing expected one does.
+
+**Its own JSON reader, roughly 150 lines, understanding only the schema pinned in [06-tooling.md](06-tooling.md#diagnostics).** A test tool that parses its input with the implementation under test cannot fail independently of it: a bug in `json` would make the suite report success. The duplicated effort is small and the independence is the entire value of the suite.
+
+**`system()` with output redirected to a temporary file, not `popen`.** `popen` is POSIX, absent from C99, and spelled `_popen` under MSVC, so it would introduce a platform shim into the test tooling before [v0.5](07-roadmap.md#v05--everywhere) needs one anywhere else. `system()` is standard C, and process startup dominates the runner's cost either way.
+
+### D067
+**Front-end implementation order: lexer, then parser, then `doot fmt` with the spec suite. Spec tests arrive with `doot fmt`, not with the lexer.** · locked
+
+*This corrects the sequencing in [09-engineering.md](09-engineering.md#testing).*
+
+A spec test drives a real command; the directives assume `doot check`; and `doot check` cannot ship until it genuinely typechecks ([D054](#d054)). So spec tests cannot arrive "with the lexer" as previously written, and waiting for the typechecker would leave the primary suite until last — the worst of the available orders.
+
+`doot fmt` resolves it. Formatting needs the lexer, the parser, and a printer and nothing else, so it is **complete rather than partial** at the parser milestone. It reports lexical and syntactic diagnostics through the same sink and the same `--json` schema as every other command, `expect-fmt-stable` is already a specified directive, and idempotent formatting is a demanding test of whether the AST and the trivia list preserve everything they must.
+
+*Consequence:* comments are tokens, always emitted and never discarded in the lexer, because a canonical formatter that deletes comments is not a formatter. The parser's advance helper skips trivia into a comment list on the compilation unit. One code path rather than a "preserve comments" flag, since a flag would create a second behavior that can drift from the first.
