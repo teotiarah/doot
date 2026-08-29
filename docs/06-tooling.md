@@ -61,20 +61,25 @@ Every diagnostic carries:
 - a **suggested fix** where one is determinable
 - **related spans** — the declaration a call site disagrees with, the earlier route that conflicts, the migration a column is missing from
 
-Human output:
+Human output. The gutter width comes from the primary span's line number, and every related span is rendered as its own snippet at the same gutter:
 
 ```
 error[DT0142]: column `emial` does not exist on table `users`
   --> routes/users.do:14:36
    |
 14 |   let u = db.one[User]("select id, emial from users where id = ?", id)!
-   |                                    ^^^^^ did you mean `email`?
+   |                                    ^^^^^
+  --> migrations/001_init.sql:3:3
    |
-note: schema built from migrations/001_init.sql:3
-help: run `doot explain DT0142` for more
+ 3 |   email text not null,
+   |   ^^^^^ table `users` declared here
+  help: replace with `email`
+  help: run `doot explain DT0142` for more
 ```
 
-Machine output — `doot check --json`:
+Tabs in a source line are expanded to four columns when rendering, and the caret is placed by display column, so a snippet stays aligned regardless of how the file is indented.
+
+Machine output — `doot check --json`, shown formatted here and emitted as one line:
 
 ```json
 {
@@ -87,13 +92,15 @@ Machine output — `doot check --json`:
     "suggestion": { "replace_span": [312, 317], "with": "email" },
     "related": [{
       "file": "migrations/001_init.sql",
-      "span": { "line": 3, "col": 3 },
+      "span": { "start": 48, "end": 53, "line": 3, "col": 3 },
       "message": "table `users` declared here"
     }]
   }],
-  "summary": { "errors": 1, "warnings": 0 }
+  "summary": { "errors": 1, "warnings": 0, "truncated": false }
 }
 ```
+
+`span` carries byte offsets *and* line/column: byte offsets are what an editing tool needs to apply an edit, line and column are what a human needs to navigate. `truncated` reports whether collection stopped at the diagnostic limit, so a consumer never mistakes a truncated list for a complete one.
 
 The `suggestion` field is a machine-applicable edit — a span and a replacement — so an agent can apply the fix without re-parsing prose. That is the difference between diagnostics an agent can *read* and diagnostics an agent can *act on*.
 
@@ -109,6 +116,7 @@ The `suggestion` field is a machine-applicable edit — a span and a replacement
 | `DT0500`–`DT0599` | routes, request binding, markup |
 | `DT0600`–`DT0699` | warnings and deprecations |
 | `DT0900`–`DT0999` | runtime faults |
+| `DT1000`–`DT1099` | driver, CLI, and I/O |
 
 ### `doot doc --agent`
 

@@ -1,0 +1,13 @@
+build/
+*.o
+*.d
+*.a
+core
+core.*
+vgcore.*
+crash-*
+leak-*
+timeout-*
+oom-*
+compile_commands.json
+.cache/

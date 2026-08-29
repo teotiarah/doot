@@ -1,0 +1,36 @@
+# Curated checks (D051). The set is chosen to catch real defects in C without
+# generating advice that fights the project's own conventions -- an advisory gate
+# is a gate that is off, so everything enabled here must stay clean.
+Checks: >
+  bugprone-*,
+  cert-*,
+  clang-analyzer-*,
+  misc-*,
+  performance-*,
+  portability-*,
+  readability-inconsistent-declaration-parameter-name,
+  readability-misleading-indentation,
+  readability-non-const-parameter,
+  readability-redundant-control-flow,
+  readability-redundant-declaration,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-macro-parentheses,
+  -bugprone-assignment-in-if-condition,
+  -cert-dcl37-c,
+  -cert-dcl51-cpp,
+  -cert-err33-c,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
+  -misc-no-recursion,
+  -misc-include-cleaner,
+  -readability-redundant-declaration
+
+# misc-include-cleaner is disabled deliberately: it wants every used symbol's
+# defining header included directly, which contradicts the project's layered
+# headers (diag.h includes source.h includes slice.h includes arena.h). That is a
+# style opinion rather than a defect check, and -Wmissing-prototypes already
+# enforces the property that matters -- that a header declares exactly its own
+# public surface.
+
+WarningsAsErrors: '*'
+HeaderFilterRegex: '.*/(src|tests|fuzz)/.*\.h$'
+FormatStyle: file
