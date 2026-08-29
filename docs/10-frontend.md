@@ -34,7 +34,6 @@ Enum members are `TOK_*` per the convention in [09-engineering.md](09-engineerin
 | Family | Members |
 | --- | --- |
 | Structural | `TOK_EOF`, `TOK_NEWLINE` |
-| Trivia | `TOK_COMMENT`, `TOK_BLOCK_COMMENT` |
 | Names and numbers | `TOK_IDENT`, `TOK_INT`, `TOK_FLOAT` |
 | Strings | `TOK_STR_START`, `TOK_STR_TEXT`, `TOK_STR_END`, `TOK_RAW_STR`, `TOK_INTERP_START`, `TOK_INTERP_END` |
 | Keywords | `TOK_KW_AND` … `TOK_KW_WITH`, one per keyword, thirty-one in total |
@@ -58,7 +57,7 @@ Keyword kinds are spelled `TOK_KW_*` rather than `TOK_*` so that `TOK_KW_IN` and
 
 ```c
 token lex_next(lexer *lx);
-token lex_peek(const lexer *lx);
+token lex_peek(lexer *lx); /* not const: filling the lookahead slot mutates */
 ```
 
 The parser drives the lexer one token at a time rather than receiving a finished array. This is not a performance choice — it is forced by markup. Deciding whether `<` opens a markup literal requires knowing whether the parser is in expression position ([D059](01-decisions.md#d059)), and a batch lexer has no way to know that. Once the lexer must be interleaved with the parser for markup, making it pull-based everywhere is simpler than having two entry points.
@@ -93,11 +92,29 @@ Identifier-shaped runs are classified by an exact-match lookup, in this order:
 - **HTTP methods.** `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS` are recognized by the *parser*, by comparing the text of an identifier that appears immediately after `route` or `stream`. The lexer stays context-free, and the parser can say "expected an HTTP method after `route`, found `Get`" instead of producing a bare parse failure.
 - **`end`**, which closes a markup control block. It is worth being explicit that `end` is **not** one of the thirty-one keywords — [D022](01-decisions.md#d022) says markup control flow reuses statement keywords, and `if`, `else`, and `for` do, but `end` has no statement equivalent. It is matched by text in markup control position, the same way stdlib module names and type names are predeclared identifiers rather than keywords ([02-syntax.md](02-syntax.md#keywords)).
 
-### Comments are tokens
+### Comments are recorded, not emitted
 
-`TOK_COMMENT` and `TOK_BLOCK_COMMENT` are **emitted into the stream, always**. They are never discarded in the lexer.
+Comments are **never discarded and never tokens**. The lexer appends each one to an optional caller-supplied list:
 
-This is not optional: `doot fmt` is canonical and idempotent ([D039](01-decisions.md#d039)), and a formatter that silently deletes every comment is not a formatter. The parser's token-advance helper skips trivia and appends it to a comment list on the compilation unit, which the printer consults when placing comments. One code path, one place where trivia is handled, no "preserve comments" flag creating a second behavior that can diverge from the first.
+```c
+lexer *lex_new(arena *a, const source *src, diag_sink *sink, lex_comments *comments);
+```
+
+`comments` may be NULL to discard them, the same way `sink` may be NULL to scan silently — a convention `source_from_memory` already uses. `doot fmt` passes a list; everything else passes NULL and allocates nothing.
+
+Preserving them is not optional: `doot fmt` is canonical and idempotent ([D039](01-decisions.md#d039)), and a formatter that silently deletes every comment is not a formatter.
+
+**Emitting them as tokens, however, does not work**, and this document said it did until the line-structure algorithm was implemented against it. The rule needs the next *significant* token across a run of newlines, and an unbounded number of comments can sit inside that run:
+
+```do
+foo()
+// a
+// b
+// c
+bar()
+```
+
+Deciding whether that newline survives means scanning past three comments to reach `bar`, and every token scanned past has to be held for later delivery. The lookahead queue is therefore as long as the comment run — unbounded, so heap-allocated, on the scanning path. That contradicts [D057](01-decisions.md#d057), whose whole point is that the lexer allocates nothing. A side list has the same cost only when a caller actually wants comments, and none of the properties are lost: comments arrive in source order with exact spans, which is all a printer needs to place them.
 
 Block comments **nest**, per [03-grammar.md](03-grammar.md#comments). An unterminated one is `DT0013`, reported at the outermost `/*` so the span points at the comment that actually failed to close rather than at end of file.
 
@@ -139,7 +156,7 @@ on a run of one or more newlines:
 
 The emitted `TOK_NEWLINE`'s **span covers the entire consumed run.** That is deliberate and load-bearing for the formatter: `doot fmt` permits at most one blank line between declarations, and it recovers how many blank lines the author wrote by counting `\n` inside the token's span. No extra field on `token`, and the span is honestly accurate rather than merely a placeholder.
 
-The pushback slot holds exactly one token, which matches the "one token of lookahead" the pipeline in [05-runtime.md](05-runtime.md#compiler-pipeline) specifies.
+Two one-token slots are needed, not one. A *stash* holds the significant token scanned past a newline run; a *peek* slot holds a token produced for `lex_peek`. Sharing a single slot loses the stash, because filling the peek slot overwrites whatever the same call just wrote there. Neither is more than one token deep, so this still matches the "one token of lookahead" the pipeline in [05-runtime.md](05-runtime.md#compiler-pipeline) specifies.
 
 ### The two sets
 

@@ -12,12 +12,15 @@
 extern const unit_suite suite_arena;
 extern const unit_suite suite_buf;
 extern const unit_suite suite_diag;
+extern const unit_suite suite_lex;
 extern const unit_suite suite_slice;
 extern const unit_suite suite_source;
 
 int main(int argc, char **argv) {
+  /* Ordered by layer, so a base-layer failure is reported before the failures it
+   * causes further up. */
   static const unit_suite *const suites[] = {
-      &suite_arena, &suite_buf, &suite_slice, &suite_source, &suite_diag,
+      &suite_arena, &suite_buf, &suite_slice, &suite_source, &suite_diag, &suite_lex,
   };
   const char *filter = NULL;
 

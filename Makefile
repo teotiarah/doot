@@ -37,7 +37,15 @@ endif
 OUT      := build/$(PROFILE)
 CFLAGS   := $(COMMON) $(PROFILE_FLAGS) $(DEFS)
 
-LIB_SRCS  := $(wildcard src/base/*.c)
+# The library layers, in dependency order. Adding a subsystem means adding its
+# directory here and to the unit list in tools/amalgamate.sh, and nothing else:
+# objects, link lines, the format set, tidy, and the depfile include all derive
+# from this. The list stays explicit and ordered rather than a glob over src/,
+# because layer order is a deliberate property, not an alphabetical accident.
+LAYERS    := base lex
+
+LIB_SRCS  := $(foreach d,$(LAYERS),$(wildcard src/$(d)/*.c))
+LIB_HDRS  := $(foreach d,$(LAYERS),$(wildcard src/$(d)/*.h))
 CLI_SRCS  := $(wildcard src/cli/*.c)
 TEST_SRCS := $(wildcard tests/unit/*.c)
 
@@ -54,7 +62,7 @@ FUZZ_CC      ?= clang
 FUZZ_FLAGS   := $(STD) -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all
 
 FMT_FILES := $(LIB_SRCS) $(CLI_SRCS) $(TEST_SRCS) $(FUZZ_SRCS) \
-             $(wildcard src/base/*.h) $(wildcard src/cli/*.h) $(wildcard tests/unit/*.h)
+             $(LIB_HDRS) $(wildcard src/cli/*.h) $(wildcard tests/unit/*.h)
 
 # Style and analysis tools are pinned (D055). A formatter or analyzer that
 # differs between a developer's machine and CI produces a gate that passes
