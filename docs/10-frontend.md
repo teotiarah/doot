@@ -425,3 +425,50 @@ Both are named in [09-engineering.md](09-engineering.md#5-fuzzing--fuzz) and lan
 | `fuzz_parse` | a full parse, asserting arbitrary input yields diagnostics rather than a crash, a hang, or unbounded memory |
 
 `fuzz_lex` covers the mode stack only through string interpolation, since markup mode is entered by the parser; markup tokenization is reached through `fuzz_parse`. That is a real limitation of the split in [D059](01-decisions.md#d059), and it is the correct trade: the alternative is a lexer that guesses at expression position.
+
+
+---
+
+## The printer
+
+`src/parse/print.c`, behind `doot fmt`. One format, no options ([D039](01-decisions.md#d039)); what it normalizes and what it preserves is [D068](01-decisions.md#d068).
+
+The printer works from the AST, not the token stream, so it can only reproduce what the tree records. Three things are therefore read back out of the source through spans:
+
+| Recovered from the source | Why the AST cannot hold it |
+| --- | --- |
+| comments | they are not tokens ([D067](01-decisions.md#d067)); the lexer collects them into the unit's comment list |
+| whether a blank line separated two declarations | whitespace is not a node |
+| whether the author broke an argument list or a markup body | line structure is not a node either, and [D068](01-decisions.md#d068) preserves it |
+
+Two of those need a precise question rather than an obvious one. "Did the author break this list" is **not** "does this construct span a newline": a call whose argument is a multi-line markup literal always spans one, so `layout(room, <div>` would explode into one argument per line even though the argument list was never broken. The question is whether a newline falls *between* the opening delimiter and the first element, or between two elements.
+
+### Parentheses are re-derived
+
+The AST does not record the author's parentheses, so the printer puts back exactly the ones the tree requires, from the precedence table in [03-grammar.md](03-grammar.md#precedence). A left-associative operator prints its right operand one level tighter; `else` is right-associative and prints its left operand one level tighter.
+
+This makes the printer a check on the parser. If a tree were shaped wrongly — a mis-associated chain, an operator at the wrong level — the reprinted parentheses would move, and `expect-fmt-stable` would catch it. `(1 + 2) * 3` keeps its parentheses and `1 + (2 * 3)` loses them, because only one of the two is load-bearing.
+
+### Idempotence
+
+Every printer test asserts that formatting the output again is a no-op, rather than leaving that to one test of its own. It is the strongest available check that the AST and the comment list together capture everything a source file means: anything the tree quietly drops shows up as a second pass that differs from the first.
+
+The strongest single case is that **the chat application in [02-syntax.md](02-syntax.md#a-complete-application) formats to itself, byte for byte.** If the printer and the documentation disagreed, one of them would be wrong, and this is the assertion that says which.
+
+---
+
+## The filesystem boundary
+
+ISO C has no directory traversal, and `doot fmt` has to walk a project, so `src/base/fs.h` is the first part of doot that needs an operating system interface — and deliberately the only one. The POSIX implementation covers Linux and macOS; Windows arrives with the rest of [v0.5](07-roadmap.md#v05--everywhere) and needs `FindFirstFile` in that one file, which is why the API returns a plain list rather than exposing a handle.
+
+Three properties are worth stating, because each of them is a decision rather than an implementation detail:
+
+- **Entries come back sorted by name.** `readdir` order is whatever the filesystem chooses, and a tool that rewrites source files must visit them in the same order every time, or its report changes between machines for no reason.
+- **A write replaces the file through a temporary and a rename.** A formatter that truncates a file it then fails to rewrite is worse than one that does nothing. `rename` is ISO C, so this costs nothing in portability.
+- **Dotfiles are skipped**, which keeps `.git` out of a project walk without needing a list of directories to ignore.
+
+`fs_read_dir` and `fs_write_file` take a `diag_sink` and report `DT1003` and `DT1002` themselves, the same way `source_from_file` reports `DT1001`. That is not symmetry for its own sake: a code that only the CLI can reach cannot be unit-tested, and [D049](01-decisions.md#d049) does not allow a registered code with no test.
+
+### A file that does not parse is not formatted
+
+`doot fmt` skips it and reports the diagnostics. The parser recovers in order to find more than one error per run ([parse.h](../src/parse/parse.h)), so a failed parse leaves a tree with holes in it — and printing that tree would produce plausible-looking source that silently differs from what the author wrote. Refusing is the only safe answer, and it is why `fmt_unit` documents that its caller must check the sink first.

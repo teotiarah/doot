@@ -80,22 +80,25 @@ typedef struct {
 
 /* ---- paths ------------------------------------------------------------- */
 
-/* A dotted name: `time.Time`, `models.user.find`. There are no imports (D030),
- * so every non-local name is a fully qualified path and the parser never has to
- * resolve an alias. */
-typedef struct path_seg path_seg;
+/* A dotted name: `time.Time`, `models.user.find`. There are no imports (D030), so
+ * every non-local name is fully qualified and the parser never resolves an alias.
+ *
+ * Called `name_path` rather than `path` because `path` is what a filesystem path is
+ * called everywhere else -- in src/base/fs.h, and in the `path` stdlib module -- and
+ * a global typedef of that name shadows the obvious variable name for one. */
+typedef struct name_seg name_seg;
 
-struct path_seg {
+struct name_seg {
   slice name;
   span at;
-  path_seg *next;
+  name_seg *next;
 };
 
 typedef struct {
-  path_seg *first;
-  path_seg *last;
+  name_seg *first;
+  name_seg *last;
   uint32_t count;
-} path;
+} name_path;
 
 /* ---- attributes -------------------------------------------------------- */
 
@@ -131,7 +134,7 @@ struct type_ref {
   bool optional; /* T? -- the only type that can hold nil (D017) */
   union {
     struct {
-      path segs;
+      name_path segs;
       type_list args; /* [T] applied to a stdlib slot; user code has none (D019) */
     } p;
     struct {
@@ -311,12 +314,12 @@ struct expr {
     bool bool_value;
     str_part_list str;
     slice raw_str; /* the bytes between the backticks, verbatim */
-    path ident;
+    name_path ident;
     slice variant;
     expr_list list;
     map_entry_list map;
     struct {
-      path type_name;
+      name_path type_name;
       field_init_list fields;
     } struct_lit;
     struct {
@@ -660,7 +663,7 @@ pattern *ast_pattern(arena *a, pattern_kind kind, span at);
 markup_node *ast_markup(arena *a, markup_kind kind, span at);
 attr *ast_attr(arena *a, slice name, span at);
 
-path_seg *ast_path_seg(arena *a, slice name, span at);
+name_seg *ast_name_seg(arena *a, slice name, span at);
 str_part *ast_str_part(arena *a, span at);
 field_init *ast_field_init(arena *a, slice name, span at);
 map_entry *ast_map_entry(arena *a, span at);
@@ -680,7 +683,7 @@ void type_list_push(type_list *l, type_ref *n);
 void pattern_list_push(pattern_list *l, pattern *n);
 void markup_list_push(markup_list *l, markup_node *n);
 void attr_list_push(attr_list *l, attr *n);
-void path_push(path *l, path_seg *n);
+void name_path_push(name_path *l, name_seg *n);
 void str_part_list_push(str_part_list *l, str_part *n);
 void field_init_list_push(field_init_list *l, field_init *n);
 void map_entry_list_push(map_entry_list *l, map_entry *n);
@@ -699,6 +702,6 @@ const char *stmt_kind_name(stmt_kind kind);
 const char *decl_kind_name(decl_kind kind);
 
 /* The dotted spelling of a path, allocated in the arena: `models.user.find`. */
-slice path_text(arena *a, const path *p);
+slice name_path_text(arena *a, const name_path *p);
 
 #endif /* DOOT_AST_H */

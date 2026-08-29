@@ -377,4 +377,16 @@
     "The file could not be opened or read.\n"                                                      \
     "\n"                                                                                           \
     "Check that the path is spelled correctly, that the file exists, and that you have\n"          \
-    "permission to read it.")
+    "permission to read it.")                                                                      \
+                                                                                                   \
+  X(DIAG_CANNOT_WRITE_FILE, "DT1002", DIAG_ERROR, "cannot write file",                             \
+    "The file could not be replaced.\n"                                                            \
+    "\n"                                                                                           \
+    "`doot fmt` writes a temporary file beside the target and renames it over the top, so\n"       \
+    "a failure here leaves the original file untouched. Check that the directory is\n"             \
+    "writable and that the filesystem is not full.")                                               \
+                                                                                                   \
+  X(DIAG_CANNOT_READ_DIR, "DT1003", DIAG_ERROR, "cannot read directory",                           \
+    "The directory could not be listed.\n"                                                         \
+    "\n"                                                                                           \
+    "Check that the path is spelled correctly and that you have permission to read it.")

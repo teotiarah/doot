@@ -79,7 +79,7 @@ tools/amalgamate.sh build/doot.c
 cc -O2 -o doot build/doot.c
 ```
 
-The binary currently supports `doot codes` and `doot explain <code>`. Commands appear only when they fully work ([D054](docs/01-decisions.md#d054)) — the set grows as subsystems land. See [09-engineering.md](docs/09-engineering.md) for the build, test, and CI setup.
+The binary currently supports `doot fmt`, `doot codes`, and `doot explain <code>`. Commands appear only when they fully work ([D054](docs/01-decisions.md#d054)) — the set grows as subsystems land. See [09-engineering.md](docs/09-engineering.md) for the build, test, and CI setup.
 
 ## Documentation
 

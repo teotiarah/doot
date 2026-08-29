@@ -23,10 +23,12 @@ Checks: >
   -misc-no-recursion,
   -misc-include-cleaner,
   -readability-redundant-declaration,
-  -clang-analyzer-valist.Uninitialized
+  -clang-analyzer-valist.Uninitialized,
+  -bugprone-reserved-identifier
 
-# Two checks are disabled deliberately. Both are configuration in this file, not
-# inline suppression in source, which D053 forbids.
+# Three checks are disabled deliberately. All are configuration in this file, not
+# inline suppression in source, which D053 forbids. The rule applied when deciding:
+# a check that correct code cannot satisfy is not a check (D055).
 #
 # misc-include-cleaner wants every used symbol's defining header included
 # directly, which contradicts the project's layered headers (diag.h includes
@@ -52,6 +54,23 @@ Checks: >
 # a missing va_end, and use-after-va_end. doot has six variadic functions, all in
 # src/base, all covered by unit tests, and all clean under ASan and UBSan. If the
 # upstream checker becomes host-independent, this line comes back out.
+#
+# bugprone-reserved-identifier flags `#define _POSIX_C_SOURCE 200809L`, which is
+# correct: the identifier is reserved to the implementation. But defining it is
+# also the only standard way to ask for POSIX, and src/base/fs.c needs opendir and
+# stat because ISO C has no directory traversal.
+#
+# It cannot move to the build flags. D035 requires that `cc -O2 -o doot
+# build/doot.c` builds the whole project with no other arguments, so the
+# amalgamation carries no -D options and the macro has to be in the source.
+#
+# Residual risk accepted: the checker would otherwise catch a genuinely
+# ill-advised identifier -- a leading underscore on a file-scope name, or a name
+# containing a double underscore. -Wall -Wextra -Wpedantic do not cover that, so
+# this one is a real loss rather than a false positive being silenced. It is
+# bounded by there being exactly one reserved identifier in the tree, which is
+# greppable: `grep -rn '_POSIX_C_SOURCE' src`. If clang-tidy grows an option to
+# allow specific feature-test macros, this line comes back out.
 
 WarningsAsErrors: '*'
 HeaderFilterRegex: '.*/(src|tests|fuzz)/.*\.h$'

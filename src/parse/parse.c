@@ -18,7 +18,8 @@ typedef struct {
   lexer *lx;
   unit_ast *unit;
 
-  token tok; /* the current token; lex_peek gives one more */
+  token tok;    /* the current token; lex_peek gives one more */
+  span prev_at; /* the span of the token most recently consumed */
   uint32_t depth;
 
   /* Syntax errors cascade, so a second one at a position already reported is
@@ -79,6 +80,7 @@ static bool report_ok(parser *p, span at) {
 /* ---- token helpers ----------------------------------------------------- */
 
 static void advance(parser *p) {
+  p->prev_at = p->tok.at;
   p->tok = lex_next(p->lx);
 }
 
@@ -472,22 +474,22 @@ static expr *parse_string(parser *p) {
 
 /* ---- types ------------------------------------------------------------- */
 
-static path parse_path(parser *p) {
-  path result;
+static name_path parse_path(parser *p) {
+  name_path result;
 
   memset(&result, 0, sizeof(result));
   if (!check(p, TOK_IDENT)) {
     unexpected(p, "a name");
     return result;
   }
-  path_push(&result, ast_path_seg(p->a, tok_text(p, p->tok), p->tok.at));
+  name_path_push(&result, ast_name_seg(p->a, tok_text(p, p->tok), p->tok.at));
   advance(p);
   while (check(p, TOK_DOT)) {
     if (!peek_is_name(p)) {
       break;
     }
     advance(p);
-    path_push(&result, ast_path_seg(p->a, tok_text(p, p->tok), p->tok.at));
+    name_path_push(&result, ast_name_seg(p->a, tok_text(p, p->tok), p->tok.at));
     advance(p);
   }
   return result;
@@ -635,7 +637,7 @@ static pattern *parse_pattern(parser *p) {
 
 /* ---- expression helpers ------------------------------------------------ */
 
-static bool expr_to_path(const expr *e, path *out) {
+static bool expr_to_path(const expr *e, name_path *out) {
   /* An `a.b.c` chain reinterpreted as a dotted name, which is how a struct
    * literal's type and a type argument are recovered without backtracking. */
   if (e->kind == EXPR_IDENT) {
@@ -695,7 +697,7 @@ static expr *parse_lambda(parser *p) {
   } else if (check(p, TOK_LBRACE)) {
     e->as.lambda.has_block = true;
     e->as.lambda.body = parse_block(p);
-    e->at = span_join(start, p->tok.at);
+    e->at = span_join(start, p->prev_at);
   } else {
     unexpected(p, "`=>` or a block for the lambda body");
   }
@@ -837,11 +839,11 @@ static expr *parse_primary(parser *p) {
   if (check(p, TOK_KW_TEST) ||
       (check(p, TOK_RESERVED) && slice_eq_cstr(tok_text(p, p->tok), "static"))) {
     e = ast_expr(p->a, EXPR_IDENT, start);
-    path_push(&e->as.ident, ast_path_seg(p->a, tok_text(p, p->tok), p->tok.at));
+    name_path_push(&e->as.ident, ast_name_seg(p->a, tok_text(p, p->tok), p->tok.at));
     advance(p);
     while (check(p, TOK_DOT) && peek_is_name(p)) {
       advance(p);
-      path_push(&e->as.ident, ast_path_seg(p->a, tok_text(p, p->tok), p->tok.at));
+      name_path_push(&e->as.ident, ast_name_seg(p->a, tok_text(p, p->tok), p->tok.at));
       e->at = span_join(start, p->tok.at);
       advance(p);
     }
@@ -983,7 +985,7 @@ static expr *parse_postfix(parser *p) {
       continue;
     }
     if (check(p, TOK_LBRACE) && !p->no_struct) {
-      path type_name;
+      name_path type_name;
       expr *lit;
 
       memset(&type_name, 0, sizeof(type_name));
@@ -1231,7 +1233,7 @@ static expr *parse_coalesce(parser *p) {
   if (check(p, TOK_LBRACE)) {
     e->as.coalesce.form = COALESCE_BLOCK;
     e->as.coalesce.block = parse_block(p);
-    e->at = span_join(value->at, p->tok.at);
+    e->at = span_join(value->at, p->prev_at);
     return e;
   }
   if (e->as.coalesce.binds_err) {
@@ -1537,7 +1539,7 @@ static markup_node *parse_markup_element(parser *p, bool entering) {
       if (check(p, TOK_ATTR_NAME)) {
         expr *name = ast_expr(p->a, EXPR_IDENT, p->tok.at);
 
-        path_push(&name->as.ident, ast_path_seg(p->a, tok_text(p, p->tok), p->tok.at));
+        name_path_push(&name->as.ident, ast_name_seg(p->a, tok_text(p, p->tok), p->tok.at));
         a->value = name;
         advance(p);
       } else if (check(p, TOK_INTERP_START)) {
@@ -1572,6 +1574,21 @@ static markup_node *parse_markup_element(parser *p, bool entering) {
     depth_leave(p);
     return node;
   }
+
+  /* `<br>` is the same element as `<br/>`, so a void element ends at its `>`. The
+   * lexer has to be told while `>` is still the current token, because it has
+   * already put the frame into content mode and would otherwise scan whatever
+   * follows as this element's children. */
+  if (is_void_element(node->as.element.tag)) {
+    node->as.element.self_closing = true;
+    node->at = span_join(open, p->tok.at);
+    lex_close_element(p->lx);
+    advance(p);
+    p->no_struct = saved_no_struct;
+    depth_leave(p);
+    return node;
+  }
+
   advance(p); /* past `>`, now in content */
 
   parse_markup_children(p, &node->as.element.children, node->as.element.tag);
@@ -1594,19 +1611,23 @@ static markup_node *parse_markup_element(parser *p, bool entering) {
     advance(p);
     if (check(p, TOK_TAG_NAME)) {
       slice name = tok_text(p, p->tok);
-      if (!slice_eq(name, node->as.element.tag)) {
+
+      /* A closing tag naming a void element gets the specific message rather than
+       * the generic mismatch. Since a void element self-closes at its `>`, a
+       * `</br>` never matches an open element, and "takes no closing tag" is the
+       * more useful of the two things we could say. */
+      if (is_void_element(name)) {
+        P_REPORT(p, DIAG_MARKUP_VOID_WITH_CLOSE, close_at,
+                 "`%.*s` is a void element and takes no closing tag", (int)name.n, name.p);
+      } else if (!slice_eq(name, node->as.element.tag)) {
         diag *d = NULL;
+
         if (p->sink != NULL) {
           d = diag_report(p->sink, DIAG_MARKUP_TAG_MISMATCH, p->src, p->tok.at,
                           "closing `%.*s` does not match the open tag", (int)name.n, name.p);
           diag_label_add(p->sink, d, p->src, open, "`%.*s` opened here",
                          (int)node->as.element.tag.n, node->as.element.tag.p);
         }
-      }
-      if (is_void_element(node->as.element.tag)) {
-        P_REPORT(p, DIAG_MARKUP_VOID_WITH_CLOSE, close_at,
-                 "`%.*s` is a void element and takes no closing tag", (int)node->as.element.tag.n,
-                 node->as.element.tag.p);
       }
       advance(p);
     }
@@ -1741,7 +1762,13 @@ static stmt *parse_if_stmt(parser *p) {
   advance(p);
   s->as.if_.cond = parse_cond(p);
   s->as.if_.then_body = parse_block(p);
-  s->at = span_join(start, p->tok.at);
+  s->at = span_join(start, p->prev_at);
+  /* `else` is not a follow token, so an `else` written on the line after the `}`
+   * arrives with a newline in front of it. Accepting that is free, and `doot fmt`
+   * normalizes it to `} else {`, so there is still one canonical spelling. */
+  if (check(p, TOK_NEWLINE) && lex_peek(p->lx).kind == TOK_KW_ELSE) {
+    advance(p);
+  }
   if (check(p, TOK_KW_ELSE)) {
     advance(p);
     s->as.if_.has_else = true;
@@ -1750,7 +1777,7 @@ static stmt *parse_if_stmt(parser *p) {
       s->at = span_join(start, s->as.if_.else_if->at);
     } else {
       s->as.if_.else_body = parse_block(p);
-      s->at = span_join(start, p->tok.at);
+      s->at = span_join(start, p->prev_at);
     }
   }
   return s;
@@ -1808,7 +1835,7 @@ static stmt *parse_stmt(parser *p) {
     p->loop_depth++;
     s->as.while_.body = parse_block(p);
     p->loop_depth--;
-    s->at = span_join(start, p->tok.at);
+    s->at = span_join(start, p->prev_at);
     return s;
   }
   if (check(p, TOK_KW_FOR)) {
@@ -1834,7 +1861,7 @@ static stmt *parse_stmt(parser *p) {
     p->loop_depth++;
     s->as.for_.body = parse_block(p);
     p->loop_depth--;
-    s->at = span_join(start, p->tok.at);
+    s->at = span_join(start, p->prev_at);
     return s;
   }
   if (check(p, TOK_KW_RETURN)) {
@@ -2044,7 +2071,7 @@ static decl *parse_fn_decl(parser *p, span start) {
     d->as.fn.fallible = match(p, TOK_BANG);
   }
   d->as.fn.body = parse_block(p);
-  d->at = span_join(start, p->tok.at);
+  d->at = span_join(start, p->prev_at);
   p->in_method = saved_method;
   return d;
 }
@@ -2206,7 +2233,7 @@ static decl *parse_route_decl(parser *p, span start, bool is_stream) {
   p->in_stream = is_stream;
   d->as.route.body = parse_block(p);
   p->in_stream = saved_stream;
-  d->at = span_join(start, p->tok.at);
+  d->at = span_join(start, p->prev_at);
   return d;
 }
 
@@ -2295,7 +2322,7 @@ static decl *parse_decl(parser *p) {
       unexpected(p, "a quoted test name");
     }
     d->as.test.body = parse_block(p);
-    d->at = span_join(start, p->tok.at);
+    d->at = span_join(start, p->prev_at);
   } else if (check(p, TOK_RESERVED)) {
     slice word = tok_text(p, p->tok);
     const char *help = token_reserved_help(word);

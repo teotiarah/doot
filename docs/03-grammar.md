@@ -19,8 +19,10 @@ A `NEWLINE` token terminates a statement unless the **preceding** token is a con
 or the **following** token is a follow token:
 
 ```
-) ] } else
+) ] }
 ```
+
+The rule that decides membership of the follow set: **a follow token must not be able to begin a construct.** Suppressing the newline before a token costs the parser the ability to tell "this continues the previous line" from "this starts a new one", so only a token that can never begin anything may be in it.
 
 This means an expression may break across lines after any operator or opening bracket without a continuation marker, and a `} else {` chain stays on one logical statement.
 
@@ -30,12 +32,13 @@ A run of consecutive newlines produces at most one `NEWLINE`, whose span covers 
 
 Inside markup literals, newlines are content, not terminators. Inside a markup tag they are insignificant whitespace, so attributes may wrap.
 
-Four entries differ from this document's first version, corrected under [D060](01-decisions.md#d060):
+Five entries differ from this document's first version, corrected under [D060](01-decisions.md#d060):
 
 - Postfix `!` is **not** a continuation token, because it ended `let u = create(name)!` and swallowed the newline.
 - The compound assignments **are** continuation tokens, because `=` is one and they are the same construct.
 - `|` is one, so a multi-line `match` pattern breaks like any other binary operator.
 - `.` is a continuation token but **not** a follow token, so a method chain breaks *after* the dot. Leading-dot continuation is incompatible with `match`: an arm's pattern begins with a dot, and once the newline is suppressed there is no way to tell `render()` followed by `.banned` from `render().banned`. Required syntax wins over optional style.
+- `else` is likewise a continuation token but **not** a follow token, for the same reason one level up: it begins a match arm, so the previous arm's value swallowed it as an `else` coalesce. It needed suppression only for an `else` written on its own line after a `}`, and the parser accepts that form anyway by looking past the newline, with `doot fmt` normalizing it to `} else {`.
 
 `<` and `>` are unambiguous here because markup delimiters are distinct token kinds and never the comparison operators ([D059](01-decisions.md#d059)).
 

@@ -772,6 +772,23 @@ static void a_void_element_self_closes(unit *t) {
   fix_free(&f);
 }
 
+static void a_void_element_written_without_a_slash_still_self_closes(unit *t) {
+  /* `<br>` and `<br/>` are the same element. Without this the lexer keeps the
+   * frame in content mode and everything after `<br>` becomes its children,
+   * swallowing the rest of the literal. */
+  fixture f;
+  const markup_node *div;
+
+  div = parse_value(t, &f, "<div><br>after<hr>more</div>")->as.markup;
+  UNIT_EQ_SLICE(t, div->as.element.tag, "div");
+  UNIT_EQ_INT(t, div->as.element.children.count, 4);
+  UNIT_EQ_INT(t, div->as.element.children.first->kind, MARKUP_ELEMENT);
+  UNIT_EQ_SLICE(t, div->as.element.children.first->as.element.tag, "br");
+  UNIT_TRUE(t, div->as.element.children.first->as.element.self_closing);
+  UNIT_EQ_INT(t, div->as.element.children.first->next->kind, MARKUP_TEXT);
+  fix_free(&f);
+}
+
 static void interpolation_in_text_and_attributes(unit *t) {
   fixture f;
   const expr *e = parse_value(t, &f, "<a href=\"/users/${u.id}\">${u.name}</a>");
@@ -851,7 +868,9 @@ static void a_mismatched_closing_tag_carries_both_spans(unit *t) {
 static void markup_errors_are_reported(unit *t) {
   fixture f;
 
-  fix_init(&f, "let x = <br>text</br>\n");
+  /* A void element self-closes at its `>`, so its closing tag never matches an
+   * open element and gets the specific message rather than the generic mismatch. */
+  fix_init(&f, "let x = <div><br>text</br></div>\n");
   UNIT_TRUE(t, has_code(&f.sink, DIAG_MARKUP_VOID_WITH_CLOSE));
   fix_free(&f);
 
@@ -1124,6 +1143,8 @@ static const unit_case cases[] = {
     {"deferred_features_parse_but_are_unavailable", deferred_features_parse_but_are_unavailable},
     {"a_markup_literal_becomes_an_element_tree", a_markup_literal_becomes_an_element_tree},
     {"a_void_element_self_closes", a_void_element_self_closes},
+    {"a_void_element_written_without_a_slash_still_self_closes",
+     a_void_element_written_without_a_slash_still_self_closes},
     {"interpolation_in_text_and_attributes", interpolation_in_text_and_attributes},
     {"markup_control_flow_uses_statement_keywords", markup_control_flow_uses_statement_keywords},
     {"markup_if_chains_collect_branches", markup_if_chains_collect_branches},

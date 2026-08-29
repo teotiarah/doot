@@ -74,8 +74,8 @@ attr *ast_attr(arena *a, slice name, span at) {
   return n;
 }
 
-path_seg *ast_path_seg(arena *a, slice name, span at) {
-  path_seg *n = ARENA_NEW(a, path_seg);
+name_seg *ast_name_seg(arena *a, slice name, span at) {
+  name_seg *n = ARENA_NEW(a, name_seg);
 
   DOOT_ASSERT(n != NULL);
   n->name = name;
@@ -181,7 +181,7 @@ AST_LIST_PUSH(type_list_push, type_list, type_ref)
 AST_LIST_PUSH(pattern_list_push, pattern_list, pattern)
 AST_LIST_PUSH(markup_list_push, markup_list, markup_node)
 AST_LIST_PUSH(attr_list_push, attr_list, attr)
-AST_LIST_PUSH(path_push, path, path_seg)
+AST_LIST_PUSH(name_path_push, name_path, name_seg)
 AST_LIST_PUSH(str_part_list_push, str_part_list, str_part)
 AST_LIST_PUSH(field_init_list_push, field_init_list, field_init)
 AST_LIST_PUSH(map_entry_list_push, map_entry_list, map_entry)
@@ -308,8 +308,8 @@ const char *decl_kind_name(decl_kind kind) {
   DOOT_UNREACHABLE();
 }
 
-slice path_text(arena *a, const path *p) {
-  const path_seg *s;
+slice name_path_text(arena *a, const name_path *p) {
+  const name_seg *s;
   buf out;
 
   DOOT_ASSERT(a != NULL && p != NULL);

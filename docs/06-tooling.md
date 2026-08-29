@@ -132,7 +132,11 @@ Emits a compact, complete language and stdlib reference sized to drop into an ag
 
 Fixed choices: two-space indentation; no semicolons; no trailing whitespace; one blank line maximum between declarations; struct fields aligned on the colon; markup indented as markup with attributes wrapped past 100 columns; imports do not exist, so there is nothing to sort.
 
-Naming is part of the format and is enforced, not suggested: modules `lower`, types `PascalCase`, functions and fields `snake_case`, enum variants `snake_case`, constants `snake_case` (there is no separate constant case, because there are no globals to distinguish).
+Naming is enforced, not suggested: modules `lower`, types `PascalCase`, functions and fields `snake_case`, enum variants `snake_case`, constants `snake_case` (there is no separate constant case, because there are no globals to distinguish).
+
+It is enforced by **`doot check`, not by `doot fmt`** ([D069](01-decisions.md#d069)). A formatter cannot rename: renaming changes what the code means and requires rewriting every use site, which is refactoring rather than formatting. `doot fmt` therefore reports nothing about names, and the checker reports a violation with the correct spelling as a machine-applicable suggestion.
+
+**Line structure inside markup and argument lists is preserved, not decided** ([D068](01-decisions.md#d068)). Everything else is canonical — indentation, spacing, parentheses, void elements, blank lines, field alignment — but the printer never adds or removes a line break inside a markup literal or an argument list, because whitespace between elements is rendered content and because a formatter with no wrapping rule must not join a line the author broke.
 
 ---
 

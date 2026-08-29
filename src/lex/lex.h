@@ -70,6 +70,17 @@ token lex_peek(lexer *lx);
  * (D059). */
 void lex_open_markup(lexer *lx, span at);
 
+/* Close the innermost open element without a closing tag.
+ *
+ * A void element may be written `<br>` as well as `<br/>`, and both are accepted
+ * (03-grammar.md#semantics). The lexer cannot tell the difference on its own: it
+ * has no element table and, having just emitted `>`, has already put the frame
+ * into content mode. So the parser -- which does know the void elements -- calls
+ * this while `>` is still the current token, before advancing, so that the next
+ * token is scanned in the enclosing element's context rather than as this
+ * element's content. */
+void lex_close_element(lexer *lx);
+
 /* The source bytes a token covers. */
 slice lex_text(const lexer *lx, token t);
 
