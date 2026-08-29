@@ -1,0 +1,432 @@
+# Decision log
+
+Every locked decision, with the argument that produced it and the alternatives that lost.
+
+**These decisions do not get revisited.** The project's development model is stable-from-day-one: we reason a decision through once, write down why, and live with it. Reversing a decision is far more expensive than spending another day getting it right. A decision is reopened only on new information that invalidates the original argument — not on preference, not on fashion, and not because implementing it turned out to be tedious.
+
+Status values: **locked** (settled, implement as written) · **locked, deferred** (settled, lands in a later version — see [07-roadmap.md](07-roadmap.md)).
+
+---
+
+## Runtime and VM
+
+### D001
+**Register-based bytecode VM, interpreted, with computed-goto dispatch.** · locked
+
+32-bit fixed-width instructions, 8-bit opcode with Lua-style A/B/C and Bx/sBx operand forms. Computed goto (`&&label` / GCC-Clang label addresses) with a `switch` fallback for MSVC.
+
+Register-based over stack-based because it produces roughly 30–40% fewer instructions for the same program, and each instruction does more work — which matters more in an interpreter than in a compiler, since dispatch is the dominant cost. Fixed-width 32-bit instructions keep decoding to shifts and masks with no alignment handling.
+
+*Rejected:* a tree-walking interpreter (too slow for goal 4, and its only advantage — implementation speed — is small once a typechecker exists anyway); direct AOT compilation to machine code (forfeits portability, multiplies the maintenance surface by the number of target architectures, and is incompatible with the "one C compiler builds everything" property in [D030](#d030)).
+
+*Consequence:* a JIT remains a purely additive future option ([D035](#d035)), because the bytecode is already the stable interface.
+
+### D002
+**No NaN boxing. Untagged 8-byte value slots, with per-function GC frame maps.** · locked
+
+*This reverses an earlier project decision, deliberately.*
+
+NaN boxing exists to fit a *dynamically typed* value into 8 bytes. doot is statically typed, so it does not need the trick, and the trick costs real things:
+
+- It forces a choice between **48-bit integers** or **heap-allocated floats**. Truncated integers are a genuine correctness hazard here: Unix nanoseconds are already ~1.7 × 10¹⁸, past the 2⁶⁰ range, and SQLite rowids and Snowflake-style IDs are full 64-bit. Silent truncation on an ID field is exactly the class of bug that destroys trust in a v1.
+- It puts unmask-and-check logic on every arithmetic operation in the interpreter loop.
+
+Because every register's type is known at compile time:
+
+- Registers and locals are **raw untagged 8-byte slots**. Full `int` (i64) and full `float` (f64), both free, neither boxed.
+- The collector locates pointers via a **frame map** emitted per function at compile time — exact, table-driven, no scanning heuristics, no conservative false retention.
+- Opcodes are **type-specialized** (`ADD_I`, `ADD_F`, `CONCAT_S`, …). The interpreter's hot loop performs **zero type checks and zero unboxing**. This is the real performance dividend of static typing in a bytecode VM, and it is larger than the cache benefit of tight value packing.
+- Homogeneous containers are **packed**: `[int]` is a flat i64 array, `{str: int}` has unboxed values, struct fields are laid out C-style with no tags. The "wide values waste memory" objection therefore does not apply, because bulk data carries no tags at all.
+
+Runtime tags exist only *inside* heap objects that genuinely need them: `any` values produced by dynamic JSON parsing, and enum variants.
+
+*Rejected:* NaN boxing (above); 16-byte tagged values as in Lua 5.4 (correct and simple, but pays for tags that static types make unnecessary, and keeps type checks in the dispatch loop).
+
+*Consequence:* the future JIT is much simpler, because monomorphic typed opcodes need no type feedback, no inline caches, and no deoptimization machinery.
+
+### D003
+**Checked arithmetic. Integer overflow is a fault, not a wraparound.** · locked
+
+`int` is signed 64-bit. Overflow, division by zero, and modulo by zero raise a fault ([D012](#d012)) rather than producing a wrong number. With type-specialized opcodes the check is a single well-predicted branch on the CPU's overflow flag, which is close to free. `math.wrap_add` and friends provide explicit wrapping for the rare cases (hashes, checksums) that want it.
+
+*Rejected:* silent wraparound (C/Go/Java semantics) — the performance saving is negligible and the failure mode is silent data corruption, which is the worst possible outcome for a language whose users are not going to audit arithmetic.
+
+### D004
+**Three-tier memory: task arena, task-local compaction, frozen shared tier. No global GC. No cycle collector.** · locked (tiers 1½ and 2 deferred to v0.2)
+
+The observation that makes this work: **in a web workload, essentially all garbage is request-scoped.**
+
+- **Tier 0 — free.** Ints, floats, bools, and nil live in registers. Strings up to 22 bytes use small-string optimization and never allocate. A large fraction of a typical handler allocates nothing at all.
+- **Tier 1 — the task arena.** Every task (and every request is a task) owns a bump allocator built from pooled chunks. Allocation is a pointer increment. When the response is flushed, the entire arena resets in O(1) and its chunks return to the worker's free list. **Deallocation is free, there is no tracing, and locality is near-perfect.**
+- **Tier 1½ — task-local compaction.** A long-lived task (an SSE stream open for an hour, a background worker) would grow its arena without bound. When a task's arena crosses a threshold, a semispace copying collector runs **over that one task's arena only.** Roots are that task's registers and frames, found exactly via [D002](#d002) frame maps. Nothing outside the task can point in ([D008](#d008)). This is generational collection where the nursery is a task and the old generation is tier 2 — except a pause is bounded by *one task's* live set, typically kilobytes. Short requests never trigger it.
+- **Tier 2 — the frozen tier.** Values that outlive a request are **deep-copied into a compact immutable representation** at the moment they escape. Immutable and acyclic by construction, therefore managed by plain **non-atomic reference counting with no cycle collector, ever.** The same mechanism serves three purposes: cache entries, cross-worker message passing, and long-lived task state.
+
+**There is no stop-the-world pause in doot.** Not a short one — none. That is the property that makes tail latency predictable on a small machine.
+
+*Rejected:* tracing GC over a shared heap (global pauses, and on a 2 GB box the heap headroom a generational tracer wants is a large fraction of the machine); reference counting as the primary strategy (per-object refcount traffic on request-scoped garbage that an arena frees for zero, plus a cycle collector we would then have to build and debug); manual memory management (disqualified by goals 1 and 2).
+
+### D005
+**Per-request memory and CPU budgets, enabled by default.** · locked
+
+Defaults: 16 MB of arena per request, 15 s wall clock. Exceeding either raises a `budget_exceeded` fault, which terminates that request with a 500 and a full diagnostic, and touches nothing else.
+
+Because all request allocation flows through one arena ([D004](#d004)), the memory cap is a comparison against the arena's high-water mark — essentially free to enforce. On a single shared box this is the difference between one bad endpoint and total downtime, and it is the kind of safety property that is nearly impossible to retrofit, so it ships in v0.1.
+
+Streams are exempt from the wall-clock budget by nature and instead carry an idle timeout.
+
+### D006
+**Green tasks with blocking-style code. No async/await, no OS thread per request.** · locked (user-facing `spawn` deferred to v0.2)
+
+Frames live on a VM-managed heap stack, so suspending a task is a pointer save — no assembly, no stack copying, no platform-specific context switching. This is possible only because of [D029](#d029) (no FFI): the VM owns the entire call stack, so there is never a foreign C frame in the way. An idle SSE connection costs a few KB.
+
+Blocking syscalls — SQLite, filesystem — are offloaded to a small per-worker thread pool so they never stall the event loop.
+
+*Rejected:* **explicit async/await**, which is disqualified by goals 1 and 2 — function coloring doubles the effective API surface, forces every intermediate function to be async, and is one of the most reliable sources of AI-generated bugs. **Thread-per-request**, which is disqualified by goal 8 — 10,000 idle-but-open SSE connections at 8 MB of stack each does not fit on a 2 GB machine.
+
+*Consequence:* an SSE handler is a plain `for` loop over a subscription. That is what "native, not bolted on" means concretely.
+
+### D007
+**Multi-worker by shared-nothing isolation: N workers, one per core, each with its own heap and scheduler, sharing the listening socket via `SO_REUSEPORT`.** · locked, deferred to v0.3
+
+No locks on the hot path, non-atomic reference counts, and per-worker collection whose pauses are independent. Chosen over a shared heap with work-stealing because a shared heap forces atomic refcounts and cross-core synchronization throughout, which costs more than the scheduling flexibility is worth at this scale.
+
+Shared state is exactly two things, and no more:
+
+1. **SQLite**, for anything durable — rows, sessions, cache, job queue.
+2. **The topic bus**, for realtime fan-out, because a message published on worker 3 must reach subscribers on workers 1, 2, and 4. It moves frozen-tier values ([D004](#d004)) through an internal ring buffer with an eventfd wakeup.
+
+### D008
+**No shared mutable state at any level. Top-level mutable bindings are illegal. Function parameters are immutable. `let` is deeply immutable.** · locked
+
+This is the single most valuable constraint in the design, and it resolves several problems at once.
+
+The problem it primarily solves: in a shared-nothing runtime ([D007](#d007)), a module-level mutable global silently becomes per-worker. A counter would give correct answers with one worker in development and wrong answers with sixteen in production. Unacceptable — so the language makes the construct impossible instead of documenting the hazard.
+
+The rules:
+
+- **Top-level bindings are `let` only.** State lives in SQLite, in request scope, or in an explicitly per-worker `cache` cell whose semantics are documented as per-worker.
+- **`let` is deeply immutable** — the binding and everything reachable through it. `var` permits mutation.
+- **Function parameters are immutable.** A function cannot mutate its caller's data. To modify, bind locally with `var` and return a new value.
+
+Consequences, all good:
+
+- Program semantics are **identical at 1 worker and at 16.** "Works in dev, breaks in prod" is impossible by construction.
+- **No aliasing anywhere**, so a closure passed to `spawn` cannot race — data races are not prevented at runtime, they are unrepresentable.
+- The frozen tier's promote-by-deep-copy ([D004](#d004)) is sound trivially.
+- The compiler knows a `var` local is uniquely owned, so `xs.push(x)` mutates in place. Value semantics do not mean copying.
+
+*Rejected:* mutable parameters with a `mut` annotation in signatures (Rust-style) — it works, but it puts aliasing back in the language and requires users to reason about it; the ergonomic gain does not pay for that at this scale.
+
+### D009
+**Structural equality and value semantics for all data.** · locked
+
+`==` compares structs, lists, and maps by content. There is no reference identity operator and no object identity to observe. This follows from [D008](#d008): with no aliasing, identity is not a meaningful concept.
+
+### D010
+**HTTP/1.1 only.** · locked
+
+HTTP/2 is not in the v1 scope. The known limitation is on the record: browsers cap roughly 6 connections per origin on HTTP/1.1. The normal case — one SSE stream per tab — is unaffected. A page wanting several concurrent streams would hit the cap, and the answer is to multiplex over one stream by topic, which the `topic` API makes natural.
+
+Written by hand, zero-copy, no dependency. HTTP/2 is re-evaluated at v1.0, not before.
+
+---
+
+## The app/dashboard boundary
+
+### D011
+**The doot runtime never listens on TLS. It speaks plain HTTP/1.1 on a TCP port or a Unix domain socket. Certificates, ACME, ports, and TLS termination belong entirely to the dashboard.** · locked
+
+The philosophy rules out nginx and Caddy in the deployment path, which initially looked like it forced TLS into the app runtime. It does not — it puts TLS in the *dashboard*, which is the component that already owns host-header routing and therefore already terminates HTTP.
+
+Locking this now prevents a genuine future conflict. If both the runtime and the dashboard could terminate TLS, every deployment would raise the questions "which one holds the certificate," "which one owns port 443," and "what happens when both try to renew." Answering them once, in advance, in favor of the dashboard, is worth more than the standalone-HTTPS convenience it costs.
+
+**In production, an app listens on a Unix domain socket whose path the dashboard assigns.** This also disposes of port allocation: there are no ports to allocate, no conflicts between co-hosted apps, and no way to accidentally expose an app process to the public internet.
+
+*Consequence:* outbound TLS still exists in the runtime, for the `http` client ([D031](#d031)). Client-side TLS in, server-side TLS never. Full detail in [08-boundaries.md](08-boundaries.md).
+
+---
+
+## Errors
+
+### D012
+**Two error classes: recoverable errors are values; bugs are faults that terminate the task.** · locked
+
+**Recoverable errors** are things a correct program must handle: a missing row, a failed insert, a rejected upload, a network timeout. They are values, declared with `!` on the return type, and the compiler forces handling. There are no exceptions, no `throw`, no `try`/`catch`, and no unwinding.
+
+**Faults** are bugs and resource-limit breaches: index out of range, integer overflow, division by zero, budget exceeded ([D005](#d005)). A fault terminates **the current task only** — the request returns 500 with a full diagnostic in the log — and cannot affect the process or any other task. That containment is safe precisely because tasks are isolated with their own arenas ([D004](#d004)) and share no mutable state ([D008](#d008)).
+
+Faults are raised by the runtime and never by user code; there is no `panic` keyword.
+
+*Rejected:* making every fallible operation return a value, including indexing. `xs[i]` returning an optional that must be unwrapped is technically superior and ergonomically miserable; it would put noise on every line of ordinary code. The safe form exists as `xs.get(i) -> T?` for when the index is genuinely untrusted.
+
+### D013
+**`!` declares fallible, `!` propagates, `else` handles. Same symbol at declaration and call site.** · locked
+
+```do
+fn find(id: int) -> User?          // may be absent
+fn create(name: str) -> User!      // may fail
+
+let u = create(name)!                              // propagate; caller must be ! too
+let u = create(name) else return page.error(500)   // handle and bail
+let u = find(id) else User.guest()                 // supply a default
+let n = find(id) else { log.warn("miss"); return http.not_found() }
+```
+
+The symmetry is the point: **the declaration and the call site use the same mark**, so a reviewer scanning agent-written code can verify error handling visually without consulting signatures. `else` for coalescing reads as English — "find the user, else return not found" — and reuses an existing keyword, so there is no `orelse` / `??` / `unwrap_or` / `expect` family to learn.
+
+*Rejected:* Go's `if err != nil` (three lines of noise per call, and the compiler cannot force handling); exceptions (invisible control flow, and unwinding interacts badly with arena lifetimes); Zig's prefix `try` (breaks left-to-right reading and loses the declaration/call-site symmetry).
+
+### D014
+**One universal `Error` type with a `kind` tag. No generic `Result<T, E>`.** · locked
+
+`Error` carries a `kind` (enum tag), a `message`, a `cause` chain, and a **source location captured automatically**. Handling inspects the kind:
+
+```do
+match err.kind {
+  .not_found -> return http.not_found()
+  .conflict  -> return http.conflict()
+  else       -> return http.error(500)
+}
+```
+
+A user-parameterized error type would drag in generics and variance ([D019](#d019)) for very little benefit at this scale, and would fragment the ecosystem's error handling across incompatible error types — which is precisely the problem a closed stdlib exists to avoid.
+
+*Rejected:* checked-exception-style declared error sets in the signature (`-> User ! NotFound | Conflict`). It sounds appealing for goal 9, but it makes every signature churn whenever an implementation detail changes, and the churn propagates up every call chain.
+
+---
+
+## Type system
+
+### D015
+**Statically typed, with inference for locals.** · locked
+
+Declarations are explicit; local bindings infer. Types are written `name: type`, the form most represented in the training data of the models expected to write doot (TypeScript, Python, Rust, Kotlin, Swift).
+
+### D016
+**Structs and free functions. No classes, no inheritance, no interfaces.** · locked
+
+```do
+type User { id: int, name: str }
+fn User.display(self) -> str { ... }
+```
+
+Methods attach to a type by name. No subtyping means no variance rules, no vtables, no diamond problems, and no "where is this method actually defined" question — which is a readability property (goal 2) as much as a simplicity one.
+
+*Rejected:* interfaces/traits. They are the right answer for a language with third-party libraries that must interoperate through abstractions. doot has no third-party libraries ([D029](#d029)), so the polymorphism they buy has no consumer.
+
+### D017
+**Optional types `T?`, no implicit nil, no optional chaining.** · locked
+
+Only `T?` can hold nil. Unwrapping is via `else` ([D013](#d013)). `?.` chaining is deliberately absent: it encourages long chains that silently produce nil from an unknown link, which is precisely the kind of invisible failure goal 9 is against. Its absence produces a clear compile error with an obvious fix, which is the better outcome.
+
+### D018
+**Enums are tag-only in v0.1. No payload-carrying variants.** · locked
+
+`type Status enum { active, banned, pending }`. Sum types with payloads are genuinely useful but require exhaustiveness checking with binding patterns and interact with generics; the main use case in a web app is error classification, which [D014](#d014) already covers. Revisit at v1.0 if real code demands it.
+
+### D019
+**No user-defined generics. Built-in generic containers and a small set of stdlib generic slots only.** · locked
+
+`[T]`, `{K: V}`, and stdlib entry points like `db.all[Msg](...)` and `topic.subscribe[Msg](...)` are generic. User code cannot declare a type or function parameter.
+
+Generics are the single largest source of type-system complexity, of incomprehensible error messages, and of long compile times. They earn their cost in a language building reusable libraries for unknown consumers. doot's users build applications with concrete types, and its stdlib is written in C. Skipping them buys a great deal of goal 1 and goal 9.
+
+*Consequence:* the syntax uses `[T]` rather than `<T>` for type application, which removes the `<` ambiguity that would otherwise complicate markup literals ([D022](#d022)).
+
+### D020
+**Money is `int` in minor units. There is no decimal type.** · locked
+
+Binary floating point is wrong for money, and a correct decimal type is a large surface (precision, rounding modes, string round-tripping, SQL mapping) for a problem that integer cents solves completely. Documented as convention, with formatting helpers in `str`.
+
+---
+
+## The web model
+
+### D021
+**HTML is a distinct type, not a string. Server-rendered HTML is the output primitive.** · locked
+
+`html` is its own type. Every `${...}` interpolated into markup is **escaped automatically**, so **XSS is impossible unless the author explicitly writes `html.raw(s)`.** This soundness is the reason `html` cannot be `str`: if they were the same type, escaping could not be decided by context.
+
+There is no SSR/SSG/CSR distinction to configure, because there is only one rendering model.
+
+### D022
+**Native markup literals in the grammar, with `{if}` / `{for}` / `{end}` control flow inside them.** · locked
+
+```do
+<ul>
+  {for m in msgs}
+    <li>${m.body}</li>
+  {end}
+</ul>
+```
+
+Markup is an expression form in the language itself. This gives compile-time checked, auto-escaped, composable templates with no template engine, no second language, and no build step. Control flow inside markup uses **the same keywords as statements**, so nothing new is learned.
+
+Ambiguity with the less-than operator is resolved by requiring `<` to be immediately followed by a tag name with no intervening space, in expression position. Since type application uses `[T]` ([D019](#d019)), there is no second source of `<` ambiguity.
+
+*Rejected:* a separate template file format (a second language to learn, violating goal 1); heredoc strings typed as html (loses structural checking and nesting validation); JSX-style expression-only control flow via `map` and lambdas (correct and composable, but noticeably harder for a non-programmer to read, and goal 2 covers humans too).
+
+### D023
+**No component tags. Composition is function calls.** · locked
+
+A layout is a function: `layout("Home", <div>…</div>)`. Since a function returning `html` composes by ordinary call syntax, `<Card user=${u}/>` would add a tag-name resolution rule, a props-versus-attributes distinction, and a children/slot mechanism, to express something already expressible. Fewer rules wins.
+
+### D024
+**`route` is a top-level declaration, not a runtime registration.** · locked
+
+Because routes are declarations, **the compiler knows the entire route table.** It detects conflicting and shadowed patterns, verifies that every `:param` in the pattern has a correspondingly typed function parameter, and emits a route map for tooling (`doot routes`). Runtime registration (`app.get("/x", handler)`) forfeits all of that, and makes the set of routes something you must run the program to discover.
+
+### D025
+**Typed request binding by reserved parameter name.** · locked
+
+Path parameters bind by name. Exactly three parameter names are reserved and bind automatically:
+
+- **`form`** — the request body (urlencoded or multipart), parsed into the declared struct
+- **`query`** — the query string, parsed into the declared struct
+- **`json`** — a JSON body, parsed into the declared struct
+
+Binding runs validation from the struct's `@` attributes and short-circuits to 422 before the handler body executes. No annotations are needed, because the URL pattern is in the declaration itself, so the source of every parameter is unambiguous to a reader and to an agent.
+
+### D026
+**SSE is a declaration form (`stream`) with a `send` statement, carrying HTML fragments.** · locked, deferred to v0.2
+
+```do
+stream GET "/rooms/:room/live" (room: str) {
+  for m in topic.subscribe[Msg]("room:" + room) {
+    send <li>${m.body}</li>
+  }
+}
+```
+
+Sending **HTML fragments rather than JSON** keeps the server as the only component that knows how to render. The client swaps in what arrives. That is what makes goal 8 coherent with goal 3 instead of in tension with it.
+
+Backpressure resolves elegantly: each subscriber has a bounded buffer (default 64), and on overflow the subscription **closes with a `lagged` error**, ending the loop. The browser's built-in SSE reconnection then re-establishes it and the handler re-reads current state. SSE's own reconnect semantics are the backpressure mechanism.
+
+### D027
+**A minimal client runtime, `doot.js`, built into the binary and auto-injected.** · locked, deferred to v0.2
+
+Roughly 4 KB, doing exactly three things: progressive form submission, fragment swapping, and SSE binding via a `data-live` attribute.
+
+Without it, HTML-over-the-wire leaks: every interactive app would hand-write JavaScript, and the no-npm story would be false in practice. With it, the interaction model is complete and requires zero configuration. It is versioned with the runtime, has no build step, and is not extensible — it is a runtime component that happens to execute in the browser, not a JavaScript framework.
+
+### D028
+**Automatic CSRF protection for form posts.** · locked
+
+Enabled in v0.1 rather than added later, because a security default that changes behavior is painful to introduce after code exists. Signed tokens via HMAC, injected into `<form>` elements automatically by the markup compiler and verified before handler dispatch.
+
+---
+
+## Modules and packaging
+
+### D029
+**No package system, no registry, no FFI. Sharing is by copying source files.** · locked
+
+The finite-surface argument is in [00-vision.md](00-vision.md#the-objection-worth-answering). The structural consequences are what make this more than an ideological position: no FFI is what makes [D006](#d006) cheap, and no registry is what makes [D030](#d030) possible.
+
+A copied `.do` file is ordinary project code: compiled from source, typechecked with everything else, and readable in full by whoever depends on it.
+
+### D030
+**No import statements. Stdlib modules are pre-bound global namespaces. User modules are addressed by fully qualified path.** · locked
+
+`models/user.do` exposes `models.user.find(...)`. Within a file, local names are unqualified; everything else is fully qualified, **including files in the same directory.** `pub` marks what is exported.
+
+Slightly more verbose at call sites, and worth it: there is **no import resolution to get wrong**, no ambiguity about which `user` a name refers to, and no aliasing to trace. For agent-written code, unambiguous beats short. Creating a top-level directory whose name collides with a stdlib module is a compile error.
+
+### D031
+**The `http` client must be excellent, and it is the only third-party integration mechanism.** · locked, deferred to v0.3
+
+Connection pooling, timeouts, retries with backoff, streaming bodies, outbound TLS, typed JSON in and out. If this module is mediocre, [D029](#d029) fails, because it is the sole path to Stripe, S3, and every other service. Treated as a headline feature with its own quality bar rather than a utility.
+
+---
+
+## Data
+
+### D032
+**SQLite, embedded, single file, WAL. No other database, ever.** · locked
+
+Goal 3, directly. On a single box in the 0–50k user range, SQLite in WAL mode is not a compromise: it removes a network hop, a connection pool, a second process to supervise, and an entire category of operational failure.
+
+### D033
+**SQL is validated against the real schema at compile time, and result shapes are typechecked against structs.** · locked
+
+```do
+let u = db.one[User]("select id, name, email from users where id = ?", id)!
+```
+
+A compile error if the table does not exist, a column is misspelled, the placeholder count is wrong, or `User`'s fields do not match the result shape. The compiler builds the schema by replaying migrations into an in-memory SQLite instance, prepares each statement, and reads its column metadata.
+
+This is the decision that makes "no framework" credible, because eliminating the ORM is the hardest part of that claim. SQL stays SQL — no query builder to learn, no codegen step, no drift between schema and code — and it is checked.
+
+### D034
+**Migrations are forward-only numbered `.sql` files.** · locked
+
+`migrations/001_init.sql`, applied by `doot migrate`, tracked in a `_doot_migrations` table. **No down migrations:** the rollback that gets exercised in practice is a new forward migration, and maintaining reverse scripts that are never run produces false confidence.
+
+---
+
+## Dependencies
+
+### D035
+**Exactly two dependencies at v0.1, both vendored: SQLite and mbedTLS. `cc *.c` builds doot.** · locked
+
+| Dependency | Purpose | Lands |
+| --- | --- | --- |
+| SQLite (amalgamation) | database; also the compile-time SQL checker ([D033](#d033)) | v0.1 |
+| mbedTLS | all crypto primitives; later, outbound TLS | v0.1 |
+| libdeflate | gzip | v0.3 |
+| argon2 (reference) | password hashing | v0.4 |
+
+**mbedTLS over OpenSSL.** OpenSSL is the largest maintenance liability available: an enormous API surface, frequent CVEs, painful version skew across distributions, and a build system that will fight you. mbedTLS is small, Apache-2.0, TLS 1.3-capable, has a sane API, and — decisively — also provides SHA-256, HMAC, AES, and a CSPRNG, which eliminates a separate crypto dependency. Its compile-time config header lets us enable only what we use. An OpenSSL build flag stays available for distribution packagers who require system TLS, but is not the default.
+
+Corollary rejections: no CMake requirement, no Rust in the bootstrap chain, no code generator, no parser generator. A ten-year maintenance story requires that a plain C99 compiler and nothing else can build the project.
+
+### D036
+**No regular expression engine.** · locked
+
+Backtracking regex is a ReDoS vector reachable from untrusted input, and a large surface for something the `validate` module plus `str` matching covers for real cases. If a compelling need appears, the answer is a linear-time non-backtracking (Thompson NFA) engine with no backreferences — never a backtracker.
+
+### D037
+**A JIT is not in the v1 scope.** · locked
+
+The typed monomorphic bytecode ([D002](#d002)) makes a copy-and-patch or template JIT straightforward to add later, with no changes to the language, the bytecode, or the memory model. It stays a purely additive option, evaluated at v1.0 against measured need.
+
+---
+
+## Tooling and process
+
+### D038
+**Diagnostics are a first-class subsystem designed for machine consumption.** · locked
+
+Every diagnostic has a **stable code** (`DT0142`), an exact byte span, a plain-English explanation, and where possible a suggested fix. `doot check --json` emits the full structured set for piping into an agent. `doot explain DT0142` prints the long form. `doot doc --agent` emits a compact, complete language and stdlib reference sized for an agent's context window — **the language ships its own AI context file**, which is the most direct available attack on goal 2.
+
+Diagnostic codes are permanent once assigned. See [06-tooling.md](06-tooling.md).
+
+### D039
+**`doot fmt` is canonical and has no options.** · locked
+
+The gofmt lesson: a single non-negotiable format ends style debate, and — specifically valuable here — makes agent output deterministic and diffs meaningful. Naming is part of the format: modules `lower`, types `PascalCase`, functions and fields `snake_case`.
+
+### D040
+**Configuration is doot code. There is no config file format.** · locked
+
+Configuration is a top-level `let` of a known type in `app.do`. No TOML, no YAML, no JSON, no `.env` parsing, no dotfile dialect — and therefore no second syntax to learn, no config parser to maintain, and no class of "config is valid YAML but wrong" errors. Configuration is typechecked like everything else.
+
+### D041
+**Single-file mode is supported.** · locked
+
+`doot run app.do` runs a complete application, picking up `schema.sql` beside it if present. The PHP-like path from idea to running page costs nothing to support and matters disproportionately for adoption and for teaching.
+
+### D042
+**The keyword list and the reserved-word list are frozen at v0.1.** · locked
+
+All 31 keywords are fixed in v0.1, including those whose features land later (`spawn`, `send`, `stream`), so the grammar never churns. Additionally, 35 words are **reserved but unused** (`async`, `await`, `class`, `import`, `try`, `throw`, `switch`, `const`, `impl`, `trait`, …) so that a programmer or agent reaching for a foreign construct gets a clear, specific error instead of a confusing parse failure — and so no future addition can be a breaking change. Full list in [02-syntax.md](02-syntax.md#reserved-words).
+
+### D043
+**Attributes are a closed set. No user-defined macros, decorators, or annotations.** · locked
+
+Twelve built-in attributes in v0.1 ([02-syntax.md](02-syntax.md#attributes)). Metaprogramming is permanently out of scope: it is the fastest way to make a codebase unreadable to both a newcomer and a static analyzer, and it would put an unbounded surface behind a language whose entire premise is a bounded one.
+
+### D044
+**Task is the name of the unit of concurrency.** · locked
+
+`task`, `spawn`. Not `job` (collides with the durable queue), not `fiber`, `goroutine`, or `coroutine` (each imports expectations from another runtime).
