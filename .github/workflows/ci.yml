@@ -1,0 +1,135 @@
+name: ci
+
+# Every job here is a blocking gate (D051). Nothing is advisory: an advisory gate
+# is a gate that is off.
+#
+# Linux only through v0.4; macOS and Windows runners join at v0.5.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Nightly long fuzz run.
+    - cron: "0 3 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build (${{ matrix.cc }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+      - name: build debug and release with -Werror
+        run: |
+          make clean
+          CC=${{ matrix.cc }} make all
+          make clean
+          CC=${{ matrix.cc }} make release
+      - name: unit tests
+        run: CC=${{ matrix.cc }} make test
+
+  # Protects D035: the whole project must build from one .c file with $(CC) and
+  # nothing else. This is the decision most likely to quietly stop being true.
+  unity:
+    name: unity (cc build/doot.c)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make unity
+      - name: the amalgamation is self-contained
+        run: |
+          cp build/doot.c "$RUNNER_TEMP/doot.c"
+          cd "$RUNNER_TEMP"
+          cc -std=c99 -O2 -o doot doot.c
+          ./doot --version
+          ./doot codes
+
+  sanitize:
+    name: asan + ubsan + lsan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: CC=clang make test-asan
+
+  # Both style jobs install the versions pinned in the Makefile rather than
+  # whatever the runner image ships (D055). `make tools-check` then verifies the
+  # installed versions match, so a drifted runner fails with a clear message
+  # instead of a diagnostic nobody can reproduce locally.
+  fmt:
+    name: fmt-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install pinned clang-format and clang-tidy
+        run: |
+          pip install --quiet \
+            "clang-format==$(make -s print-CLANG_FORMAT_VERSION)" \
+            "clang-tidy==$(make -s print-CLANG_TIDY_VERSION)"
+      - run: make tools-check
+      - run: make fmt-check
+
+  tidy:
+    name: tidy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install pinned clang-format and clang-tidy
+        run: |
+          pip install --quiet \
+            "clang-format==$(make -s print-CLANG_FORMAT_VERSION)" \
+            "clang-tidy==$(make -s print-CLANG_TIDY_VERSION)"
+      - run: make tools-check
+      - run: make tidy
+
+  docs:
+    name: docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: cross-references, diagnostic codes, no TODO markers
+        run: make docs
+      - name: no vendored tree has drifted from its pin
+        run: tools/vendor.sh --verify
+
+  fuzz:
+    name: fuzz-smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The working corpus is a build artifact, never committed; caching it lets
+      # coverage compound across runs while git stays clean (fuzz/README.md).
+      - name: restore corpus
+        uses: actions/cache@v4
+        with:
+          path: build/corpus
+          key: fuzz-corpus-${{ github.sha }}
+          restore-keys: fuzz-corpus-
+      - name: smoke run plus every committed regression
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            FUZZ_SECONDS=1800 make fuzz-smoke
+          else
+            FUZZ_SECONDS=60 make fuzz-smoke
+          fi
+      - name: upload any crash found
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: |
+            crash-*
+            leak-*
+            timeout-*
+            oom-*
+          if-no-files-found: ignore

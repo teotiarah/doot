@@ -430,3 +430,100 @@ Twelve built-in attributes in v0.1 ([02-syntax.md](02-syntax.md#attributes)). Me
 **Task is the name of the unit of concurrency.** · locked
 
 `task`, `spawn`. Not `job` (collides with the durable queue), not `fiber`, `goroutine`, or `coroutine` (each imports expectations from another runtime).
+
+
+---
+
+## Implementation and engineering
+
+Practices, argued at the same standard as the language decisions because they are equally hard to change later. Details in [09-engineering.md](09-engineering.md).
+
+### D045
+**GNU Make for development; a single amalgamated `.c` file for distribution and as the portability guarantee.** · locked
+
+`tools/amalgamate.sh` emits one `build/doot.c` that includes every translation unit, so `cc -O2 -o doot build/doot.c` builds the entire project. CI enforces this on every commit.
+
+This is what turns [D035](#d035) from an aspiration into a tested property. It is also the packaging format, the fallback when `make` is unavailable, and a source of whole-program optimization without LTO. SQLite proves the model over two decades.
+
+*Rejected:* CMake (a second language to learn and maintain, and a generator whose output differs across versions); autotools (a build system larger than doot will be); a bespoke build tool written in doot (a bootstrap problem for no gain).
+
+### D046
+**A narrower subset of C99 than C99 permits.** · locked
+
+No VLAs, no `alloca`, no C11 features, no compiler extensions except computed goto behind `DOOT_HAVE_COMPUTED_GOTO`. Fixed-width integer types everywhere. No global mutable state in the implementation, mirroring [D008](#d008) so that per-worker isolation ([D007](#d007)) is structural rather than audited.
+
+`-Werror` with an aggressive warning set under **both gcc and clang**, including `-Wconversion` and `-Wswitch-enum`. `-Wconversion` demands an explicit cast at every narrowing, which is verbose and is exactly the check that catches the silent integer truncation [D002](#d002) exists to prevent. Enabling it now costs verbosity; enabling it after 40,000 lines exist would cost a week and then get switched off.
+
+### D047
+**The implementation dogfoods arenas. There is no `free()` in the compiler.** · locked
+
+One arena per compilation, released whole. This eliminates use-after-free and leaks as *categories*, speeds compilation, and keeps sanitizer output focused on runtime behavior rather than allocator bookkeeping. It also means the arena is exercised by every compile long before it carries a request.
+
+Allocation failure policy is per arena and set at construction: the compiler's arena is **fatal** on exhaustion, a request arena **returns `NULL`** which the VM converts to a `budget_exceeded` fault ([D005](#d005)).
+
+### D048
+**Assertions are always on. `NDEBUG` is never defined.** · locked
+
+An assertion failure is an invariant violation in doot itself — not a user error and not a language-level fault ([D012](#d012)). Continuing past one risks corrupting a database or serving wrong data, and for users who cannot debug the runtime, silent corruption is far worse than a loud abort with a stack trace. The cost is a predictable branch outside the interpreter's hot loop.
+
+### D049
+**Five test layers, with spec tests as the bulk of the suite.** · locked
+
+Unit tests for internal invariants, **`.do` spec tests as the executable form of the specification**, raw-socket wire tests for HTTP, sanitizers on every suite in CI, and fuzzing on everything that consumes untrusted bytes.
+
+A language is defined by what it accepts and rejects, so the suite's centre of gravity is `tests/spec/` — thousands of small `.do` files with exact expected diagnostics — not unit tests over internal functions, which pin down implementation shape rather than behavior.
+
+Two rules make it load-bearing: **a diagnostic code does not exist until a spec test produces it** (a code without a test fails CI), and **every well-formedness rule in [03-grammar.md](03-grammar.md) has an accepting and a rejecting test.** The runner consumes `doot check --json` and compares structured output exactly, so a changed span or reworded message is a visible diff rather than a silently passing substring match.
+
+Fuzzing exists from the first commit rather than being added when the parser lands, because retrofitting it means retrofitting parse-from-buffer entry points that were never designed to be called that way.
+
+### D050
+**The diagnostic registry is one X-macro table: the single source of truth for the compiler, `doot explain`, and the documentation.** · locked
+
+Code, severity, brief message, and long explanation live in one table in `src/base/diag_codes.h`. The compiler, `doot explain`, `--json` output, and the generated documentation all derive from it, so an explanation cannot drift from the code that emits it and a code cannot exist without an explanation.
+
+This is [D038](#d038) made mechanical rather than aspirational. Codes are permanent once assigned: never renumbered, never reused, never repurposed.
+
+### D051
+**Eight CI gates, all blocking.** · locked
+
+`build-gcc`, `build-clang`, `unity`, `test`, `sanitize`, `fmt-check`, `tidy`, `fuzz-smoke`, `docs`. Nothing merges with a failing gate and nothing is marked advisory — an advisory gate is a gate that is off.
+
+The `unity` gate specifically protects [D035](#d035), which is otherwise the decision most likely to quietly stop being true.
+
+### D052
+**Dependencies are committed to the repository, pinned, checksummed, and unpatched.** · locked
+
+`tools/vendor.sh` fetches a pinned version, verifies SHA-256 against `vendor/MANIFEST`, and writes the tree. A build must work with no network, no package manager, and no upstream still being online — which is what a ten-year horizon actually requires.
+
+**No local patches.** If one becomes unavoidable it lives in `vendor/patches/` as a standalone file applied by the script, with its reason and upstream issue recorded. An edit in place is invisible at the next update, and silently reverting a security fix is the failure this rule exists to prevent.
+
+Vendored code compiles with its own warning flags, is excluded from `clang-format` and `clang-tidy`, and is included in sanitizer runs.
+
+### D053
+**`clang-format` is canonical with no local exceptions.** · locked
+
+The same argument as [D039](#d039), applied to the implementation. Disagreements are settled by editing the committed config once, never by an inline `// clang-format off`.
+
+### D054
+**No stubs. A command exists only when it fully works.** · locked
+
+No placeholder implementations, no unimplemented branches, no features merged behind a flag that turns them off, and **`TODO` in the source tree is a CI failure.**
+
+The CLI grows one working command at a time. `doot check` does not appear until it genuinely checks, because a command that half-works trains users to distrust the tool and hides the real state of the project from its own author — which, on a project attempted three times, is the specific failure mode most worth engineering against.
+
+Also the eighth item in the definition of done ([09-engineering.md](09-engineering.md#definition-of-done)), which is where it gets enforced per subsystem.
+
+
+### D055
+**Style and analysis tool versions are pinned, verified before use, and installed from the pin in CI.** · locked
+
+`clang-format` and `clang-tidy` versions live in the Makefile, `make tools-check` fails on a mismatch, and CI installs exactly those versions rather than using whatever the runner image ships.
+
+Prompted by a concrete failure: the `tidy` gate passed locally and failed in CI on the first push. The cause was not the code but the environment — `clang-analyzer-valist.Uninitialized` fired on textbook-correct `va_start`/`vfprintf`/`va_end` code under one host's system headers and not another's, alongside several thousand suppressed analyzer warnings from those same headers.
+
+**A gate whose result depends on the machine it runs on is worse than no gate**, because it trains you to treat red as noise, which is precisely how a real failure gets waved through. Pinning restores the property that makes a gate worth having: `make check` locally and CI reach the same verdict. `make check` therefore includes `tidy`, so the two cannot silently diverge again.
+
+Corollary for check selection: **a check that cannot be satisfied by correct code is disabled in `.clang-tidy` with its reasoning written out, not suppressed inline** ([D053](#d053)) and not left failing. Two are currently disabled, each with the argument recorded in that file, including the residual risk accepted and the condition under which it would be re-enabled.
+
+Upgrading a pinned version is a deliberate change: bump the pin, run `make fmt`, review the resulting diff, and commit it as its own change rather than mixed into unrelated work.

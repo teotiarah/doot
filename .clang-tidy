@@ -1,0 +1,58 @@
+# Curated checks (D051). The set is chosen to catch real defects in C without
+# generating advice that fights the project's own conventions -- an advisory gate
+# is a gate that is off, so everything enabled here must stay clean.
+Checks: >
+  bugprone-*,
+  cert-*,
+  clang-analyzer-*,
+  misc-*,
+  performance-*,
+  portability-*,
+  readability-inconsistent-declaration-parameter-name,
+  readability-misleading-indentation,
+  readability-non-const-parameter,
+  readability-redundant-control-flow,
+  readability-redundant-declaration,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-macro-parentheses,
+  -bugprone-assignment-in-if-condition,
+  -cert-dcl37-c,
+  -cert-dcl51-cpp,
+  -cert-err33-c,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
+  -misc-no-recursion,
+  -misc-include-cleaner,
+  -readability-redundant-declaration,
+  -clang-analyzer-valist.Uninitialized
+
+# Two checks are disabled deliberately. Both are configuration in this file, not
+# inline suppression in source, which D053 forbids.
+#
+# misc-include-cleaner wants every used symbol's defining header included
+# directly, which contradicts the project's layered headers (diag.h includes
+# source.h includes slice.h includes arena.h). That is a style opinion rather
+# than a defect check, and -Wmissing-prototypes already enforces the property
+# that matters -- that a header declares exactly its own public surface.
+#
+# clang-analyzer-valist.Uninitialized reports false positives on the canonical
+# variadic pattern:
+#
+#     va_start(ap, fmt);
+#     vfprintf(stderr, fmt, ap);
+#     va_end(ap);
+#
+# whether it fires depends on the host's system headers rather than on the code:
+# clean on glibc 2.34, firing on glibc 2.39 with the same clang-tidy version,
+# alongside thousands of suppressed analyzer warnings from those headers. The
+# flagged code is textbook-correct C99 and cannot be rewritten to satisfy the
+# checker, so keeping it enabled would mean the gate passes or fails based on the
+# runner image -- which is not a gate.
+#
+# Residual risk accepted: the checker would otherwise catch use-before-va_start,
+# a missing va_end, and use-after-va_end. doot has six variadic functions, all in
+# src/base, all covered by unit tests, and all clean under ASan and UBSan. If the
+# upstream checker becomes host-independent, this line comes back out.
+
+WarningsAsErrors: '*'
+HeaderFilterRegex: '.*/(src|tests|fuzz)/.*\.h$'
+FormatStyle: file

@@ -61,6 +61,26 @@ That is a complete realtime chat application. No imports, no framework, no packa
 
 Written in C, with the mindset that goes with it: ship a stable v1, one minor release a year, patches in between, and make it still work in a decade.
 
+## Building
+
+Requires a C99 compiler and nothing else.
+
+```sh
+make            # -> build/debug/doot
+make test       # unit tests
+make check      # everything CI runs
+make help       # every target
+```
+
+Or without `make` at all, which is the property [D035](docs/01-decisions.md#d035) exists to guarantee and CI enforces on every commit:
+
+```sh
+tools/amalgamate.sh build/doot.c
+cc -O2 -o doot build/doot.c
+```
+
+The binary currently supports `doot codes` and `doot explain <code>`. Commands appear only when they fully work ([D054](docs/01-decisions.md#d054)) — the set grows as subsystems land. See [09-engineering.md](docs/09-engineering.md) for the build, test, and CI setup.
+
 ## Documentation
 
 | | |
@@ -74,6 +94,7 @@ Written in C, with the mindset that goes with it: ship a stable v1, one minor re
 | [06-tooling.md](docs/06-tooling.md) | CLI, machine-readable diagnostics, formatter, `doot.js` |
 | [07-roadmap.md](docs/07-roadmap.md) | v0.1 through v1.0, and the release model |
 | [08-boundaries.md](docs/08-boundaries.md) | where the runtime ends and the panel begins |
+| [09-engineering.md](docs/09-engineering.md) | build, C subset, testing strategy, fuzzing, CI gates, vendoring |
 
 **Start with [00-vision.md](docs/00-vision.md), then [02-syntax.md](docs/02-syntax.md).**
 

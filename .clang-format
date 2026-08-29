@@ -1,0 +1,32 @@
+---
+# Canonical and without local exceptions (D053). Disagreements are settled by
+# editing this file once, never with an inline `// clang-format off` in source.
+# There are no fenced regions anywhere in the tree, including the diagnostic
+# registry table, and there will not be any.
+Language: Cpp
+BasedOnStyle: LLVM
+IndentWidth: 2
+TabWidth: 8
+UseTab: Never
+ColumnLimit: 100
+PointerAlignment: Right
+DerivePointerAlignment: false
+AlignAfterOpenBracket: Align
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: false
+BreakBeforeBraces: Attach
+IndentCaseLabels: false
+SpaceAfterCStyleCast: false
+SortIncludes: CaseSensitive
+IncludeBlocks: Preserve
+AlwaysBreakAfterReturnType: None
+BinPackArguments: true
+BinPackParameters: true
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 1
+SpacesBeforeTrailingComments: 1
+AlignTrailingComments: true
+AlignConsecutiveMacros: false
+AlignEscapedNewlines: Right

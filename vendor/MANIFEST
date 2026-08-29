@@ -1,0 +1,29 @@
+# Vendored dependencies (D052).
+#
+# Pinned by version and verified by SHA-256. `tools/vendor.sh <name>` fetches and
+# installs one; `tools/vendor.sh --verify` checks that no installed tree has
+# drifted from its pin. Trees are committed to git, so a build needs no network.
+#
+# Adding a dependency requires a decision entry in docs/01-decisions.md. The list
+# is meant to stay at four (D035).
+#
+# columns: name  version  sha256  url  archive-member
+
+sqlite   3.53.0400  1e71ddf93849c6a6ecf58b827c0692073d2dd7ee40196158068f7b29f422e87d  https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip  sqlite-amalgamation-3530400
+mbedtls  3.6.7      a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6  https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.7/mbedtls-3.6.7.tar.bz2  mbedtls-3.6.7
+
+# Notes on the pins:
+#
+# sqlite   The amalgamation, not the full source tree: one .c and one .h, which is
+#          the form the compile-time SQL checker (D033) links against.
+#
+# mbedtls  The 3.6 LTS branch, deliberately, not 4.x. 4.x moved to a PSA-only
+#          crypto API split across a second repository; 3.6 is long-term support
+#          with security fixes, a stable API, and a single tree. That is the
+#          conservative choice for a project promising one minor release a year
+#          (D035). The recorded checksum matches upstream's published
+#          mbedtls-3.6.7-sha256sum.txt.
+#
+# Not yet pinned, and pinned when the version that needs them is built:
+#   libdeflate  gzip, v0.3
+#   argon2      password hashing, v0.4
