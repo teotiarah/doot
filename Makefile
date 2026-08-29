@@ -42,7 +42,7 @@ CFLAGS   := $(COMMON) $(PROFILE_FLAGS) $(DEFS)
 # objects, link lines, the format set, tidy, and the depfile include all derive
 # from this. The list stays explicit and ordered rather than a glob over src/,
 # because layer order is a deliberate property, not an alphabetical accident.
-LAYERS    := base lex
+LAYERS    := base lex parse
 
 LIB_SRCS  := $(foreach d,$(LAYERS),$(wildcard src/$(d)/*.c))
 LIB_HDRS  := $(foreach d,$(LAYERS),$(wildcard src/$(d)/*.h))

@@ -19,7 +19,7 @@ A `NEWLINE` token terminates a statement unless the **preceding** token is a con
 or the **following** token is a follow token:
 
 ```
-) ] } . else
+) ] } else
 ```
 
 This means an expression may break across lines after any operator or opening bracket without a continuation marker, and a `} else {` chain stays on one logical statement.
@@ -30,7 +30,14 @@ A run of consecutive newlines produces at most one `NEWLINE`, whose span covers 
 
 Inside markup literals, newlines are content, not terminators. Inside a markup tag they are insignificant whitespace, so attributes may wrap.
 
-Three entries differ from this document's first version, corrected under [D060](01-decisions.md#d060): postfix `!` is **not** a continuation token, because it ended `let u = create(name)!` and swallowed the newline; the compound assignments are continuation tokens, because `=` is one and they are the same construct; and `|` is one, so a multi-line `match` pattern breaks like any other binary operator. `<` and `>` are unambiguous here because markup delimiters are distinct token kinds and never the comparison operators ([D059](01-decisions.md#d059)).
+Four entries differ from this document's first version, corrected under [D060](01-decisions.md#d060):
+
+- Postfix `!` is **not** a continuation token, because it ended `let u = create(name)!` and swallowed the newline.
+- The compound assignments **are** continuation tokens, because `=` is one and they are the same construct.
+- `|` is one, so a multi-line `match` pattern breaks like any other binary operator.
+- `.` is a continuation token but **not** a follow token, so a method chain breaks *after* the dot. Leading-dot continuation is incompatible with `match`: an arm's pattern begins with a dot, and once the newline is suppressed there is no way to tell `render()` followed by `.banned` from `render().banned`. Required syntax wins over optional style.
+
+`<` and `>` are unambiguous here because markup delimiters are distinct token kinds and never the comparison operators ([D059](01-decisions.md#d059)).
 
 ### Comments
 
@@ -65,6 +72,11 @@ METHOD       := "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS"
 ### Keywords
 
 The thirty-one keywords and the reserved-word list are in [02-syntax.md](02-syntax.md#keywords). Reserved words lex as keywords and are rejected by the parser with a specific diagnostic.
+
+Two refinements, both required to make the documented standard library expressible ([D062](01-decisions.md#d062)):
+
+- A reserved word is an **ordinary name in a name position** — after `.`, as a field name, as an enum variant. `auth.require`, `uuid.new`, and `chan.new` all depend on this, and nobody writing `x.require` is reaching for a foreign construct, which is the only thing the reservation exists to catch.
+- Where a **stdlib module name** collides with a keyword or a reserved word, the module wins in expression position, because [02-syntax.md](02-syntax.md#keywords) already declares module names to be predeclared identifiers. Exactly two of the thirty-eight collide: `test` (keyword, and the assertions module used as `test.eq`) and `static` (reserved, and the file-serving module).
 
 ---
 
