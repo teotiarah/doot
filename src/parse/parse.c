@@ -1052,32 +1052,57 @@ static expr *parse_cast(parser *p) {
   return e;
 }
 
+/* Binding power, from the table in docs/03-grammar.md#precedence. Only the levels
+ * driven by this table are named; `not`, `as`, unary `-`, `or`, `and`, and the
+ * postfix chain are separate productions. */
+typedef enum {
+  PREC_CMP, /* 5: non-associative */
+  PREC_ADD, /* 6 */
+  PREC_MUL  /* 7 */
+} prec;
+
 typedef struct {
   token_kind tok;
   binop op;
+  prec level;
 } binop_row;
 
-/* TOK_MARKUP_START maps to less-than: in operator position the lexer's markup
+/* One table for every table-driven binary operator, carrying its precedence, so a
+ * level's membership test and its operator lookup cannot disagree.
+ *
+ * The lookup returns the row rather than writing through an out-parameter. That is
+ * not a style preference: with an out-parameter every caller has to declare an
+ * uninitialized `binop` and rely on a separate guard having already established
+ * that the lookup must succeed -- which the compiler cannot see through once
+ * make_binary is inlined at -O2, and which is a genuine hazard rather than a false
+ * positive, because the guard and the table are two lists that can drift apart.
+ * Returning the row makes "no operator here" and "here is the operator" the same
+ * decision, so an uninitialized operator is unrepresentable and the two lists are
+ * one list.
+ *
+ * TOK_MARKUP_START maps to less-than: in operator position the lexer's markup
  * start is a comparison, and its span covers only the `<`, so reinterpreting it
  * needs no re-lexing (D059). */
 static const binop_row binop_table[] = {
-    {TOK_PLUS, BINOP_ADD},   {TOK_MINUS, BINOP_SUB},   {TOK_STAR, BINOP_MUL},
-    {TOK_SLASH, BINOP_DIV},  {TOK_PERCENT, BINOP_MOD}, {TOK_EQ_EQ, BINOP_EQ},
-    {TOK_BANG_EQ, BINOP_NE}, {TOK_LT, BINOP_LT},       {TOK_MARKUP_START, BINOP_LT},
-    {TOK_LE, BINOP_LE},      {TOK_GT, BINOP_GT},       {TOK_GE, BINOP_GE},
-    {TOK_KW_IN, BINOP_IN},
+    {TOK_STAR, BINOP_MUL, PREC_MUL},        {TOK_SLASH, BINOP_DIV, PREC_MUL},
+    {TOK_PERCENT, BINOP_MOD, PREC_MUL},     {TOK_PLUS, BINOP_ADD, PREC_ADD},
+    {TOK_MINUS, BINOP_SUB, PREC_ADD},       {TOK_EQ_EQ, BINOP_EQ, PREC_CMP},
+    {TOK_BANG_EQ, BINOP_NE, PREC_CMP},      {TOK_LT, BINOP_LT, PREC_CMP},
+    {TOK_MARKUP_START, BINOP_LT, PREC_CMP}, {TOK_LE, BINOP_LE, PREC_CMP},
+    {TOK_GT, BINOP_GT, PREC_CMP},           {TOK_GE, BINOP_GE, PREC_CMP},
+    {TOK_KW_IN, BINOP_IN, PREC_CMP},
 };
 
-static bool binop_of(token_kind k, binop *out) {
+/* NULL when the token is not a binary operator at this level. */
+static const binop_row *binop_at(token_kind k, prec level) {
   size_t i;
 
   for (i = 0; i < sizeof(binop_table) / sizeof(binop_table[0]); i++) {
-    if (binop_table[i].tok == k) {
-      *out = binop_table[i].op;
-      return true;
+    if (binop_table[i].tok == k && binop_table[i].level == level) {
+      return &binop_table[i];
     }
   }
-  return false;
+  return NULL;
 }
 
 static expr *make_binary(parser *p, binop op, expr *lhs, expr *rhs) {
@@ -1091,52 +1116,44 @@ static expr *make_binary(parser *p, binop op, expr *lhs, expr *rhs) {
 
 static expr *parse_mul(parser *p) {
   expr *e = parse_cast(p);
+  const binop_row *r;
 
-  while (check(p, TOK_STAR) || check(p, TOK_SLASH) || check(p, TOK_PERCENT)) {
-    binop op;
-    (void)binop_of(p->tok.kind, &op);
+  while ((r = binop_at(p->tok.kind, PREC_MUL)) != NULL) {
     advance(p);
     skip_newlines(p);
-    e = make_binary(p, op, e, parse_cast(p));
+    e = make_binary(p, r->op, e, parse_cast(p));
   }
   return e;
 }
 
 static expr *parse_add(parser *p) {
   expr *e = parse_mul(p);
+  const binop_row *r;
 
-  while (check(p, TOK_PLUS) || check(p, TOK_MINUS)) {
-    binop op;
-    (void)binop_of(p->tok.kind, &op);
+  while ((r = binop_at(p->tok.kind, PREC_ADD)) != NULL) {
     advance(p);
     skip_newlines(p);
-    e = make_binary(p, op, e, parse_mul(p));
+    e = make_binary(p, r->op, e, parse_mul(p));
   }
   return e;
-}
-
-static bool is_comparison(token_kind k) {
-  return k == TOK_EQ_EQ || k == TOK_BANG_EQ || k == TOK_LT || k == TOK_LE || k == TOK_GT ||
-         k == TOK_GE || k == TOK_MARKUP_START || k == TOK_KW_IN;
 }
 
 /* Non-associative: `a < b < c` is a syntax error rather than a surprise. */
 static expr *parse_cmp(parser *p) {
   expr *e = parse_add(p);
-  binop op;
+  const binop_row *r = binop_at(p->tok.kind, PREC_CMP);
 
-  if (!is_comparison(p->tok.kind)) {
+  if (r == NULL) {
     return e;
   }
-  (void)binop_of(p->tok.kind, &op);
   advance(p);
   skip_newlines(p);
-  e = make_binary(p, op, e, parse_add(p));
+  e = make_binary(p, r->op, e, parse_add(p));
 
-  if (is_comparison(p->tok.kind)) {
+  if (binop_at(p->tok.kind, PREC_CMP) != NULL) {
     P_REPORT(p, DIAG_COMPARISON_CHAIN, p->tok.at,
              "comparison operators do not chain; write `a < b and b < c`");
-    while (is_comparison(p->tok.kind)) {
+    while (binop_at(p->tok.kind, PREC_CMP) != NULL) {
       advance(p);
       (void)parse_add(p);
     }
