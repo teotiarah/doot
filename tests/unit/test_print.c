@@ -409,6 +409,49 @@ static void a_block_comment_survives(unit *t) {
   expect_fmt(t, "/* a block */\nlet a = 1\n", "/* a block */\nlet a = 1\n");
 }
 
+/* A blank line between a comment and what follows it separates a file header
+ * from a declaration's own note, so it is the author's and gets preserved like
+ * any other blank line (D068). It was being dropped in three places: the guard
+ * that suppresses a blank line at the top of a file, immediately after a `{`, and
+ * at the top of a `group` body was also suppressing this one. Found by the first
+ * spec test written, because every spec file opens with a comment block. */
+static void a_blank_line_after_a_leading_comment_survives(unit *t) {
+  expect_fmt(t, "// a header\n\nlet a = 1\n", "// a header\n\nlet a = 1\n");
+  expect_fmt(t, "// one\n// two\n\nlet a = 1\n", "// one\n// two\n\nlet a = 1\n");
+  /* Still collapsed to exactly one, and still attached when the author attached
+   * it. */
+  expect_fmt(t, "// a header\n\n\n\nlet a = 1\n", "// a header\n\nlet a = 1\n");
+  expect_fmt(t, "// a note\nlet a = 1\n", "// a note\nlet a = 1\n");
+}
+
+/* A type's span must end at the last token the type consumed. `parse_type` was
+ * widening it to the lookahead instead, and after `type Id = int` the lookahead
+ * is the TOK_NEWLINE covering the whole newline run (D060) -- so the alias's span
+ * reached the next declaration and the printer saw no blank line left to
+ * preserve. `int?` escaped it by joining the `?` it was about to consume. */
+static void a_blank_line_after_a_type_alias_survives(unit *t) {
+  expect_fmt(t, "type Id = int\n\nlet a = 1\n", "type Id = int\n\nlet a = 1\n");
+  expect_fmt(t, "type Id = int?\n\nlet a = 1\n", "type Id = int?\n\nlet a = 1\n");
+  expect_fmt(t, "type Id = [int]\n\nlet a = 1\n", "type Id = [int]\n\nlet a = 1\n");
+  expect_fmt(t, "type Id = {str: int}\n\nlet a = 1\n", "type Id = {str: int}\n\nlet a = 1\n");
+  expect_fmt(t, "type Cb = fn(int) -> str\n\nlet a = 1\n",
+             "type Cb = fn(int) -> str\n\nlet a = 1\n");
+  /* And a multi-segment path still gets a span covering all of its segments. */
+  expect_fmt(t, "type At = time.Time\n\nlet a = 1\n", "type At = time.Time\n\nlet a = 1\n");
+}
+
+static void a_blank_line_after_a_comment_in_a_block_survives(unit *t) {
+  expect_fmt(t, "fn f() {\n// a note\n\nlet a = 1\n}\n",
+             "fn f() {\n"
+             "  // a note\n"
+             "\n"
+             "  let a = 1\n"
+             "}\n");
+  /* A blank line straight after `{` with no comment is still noise, and is still
+   * removed -- which is what the first-statement guard is actually for. */
+  expect_fmt(t, "fn f() {\n\nlet a = 1\n}\n", "fn f() {\n  let a = 1\n}\n");
+}
+
 /* ---- the documented application ---------------------------------------- */
 
 static void the_chat_application_is_already_canonical(unit *t) {
@@ -519,6 +562,11 @@ static const unit_case cases[] = {
     {"a_comment_after_the_last_declaration_survives",
      a_comment_after_the_last_declaration_survives},
     {"a_block_comment_survives", a_block_comment_survives},
+    {"a_blank_line_after_a_leading_comment_survives",
+     a_blank_line_after_a_leading_comment_survives},
+    {"a_blank_line_after_a_comment_in_a_block_survives",
+     a_blank_line_after_a_comment_in_a_block_survives},
+    {"a_blank_line_after_a_type_alias_survives", a_blank_line_after_a_type_alias_survives},
     {"the_chat_application_is_already_canonical", the_chat_application_is_already_canonical},
 };
 

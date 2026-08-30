@@ -743,6 +743,36 @@ static void a_byte_that_begins_no_token_is_reported_and_skipped(unit *t) {
   fix_free(&f);
 }
 
+/* The retry loop after a bad byte must skip trivia before looking again. It did
+ * not, so the space or newline following the bad byte was reported as a second
+ * byte that "cannot begin a token" -- untrue of both, and `let a = 1 # 2` blamed
+ * the space at column 12 as well as the `#` at column 11. */
+static void trivia_after_a_bad_byte_is_not_a_second_bad_byte(unit *t) {
+  fixture f;
+
+  fix_init(&f, "let a = 1 # 2");
+  while (lex_next(f.lx).kind != TOK_EOF) {
+    /* drain */
+  }
+  UNIT_EQ_INT(t, (int)diag_error_count(&f.sink), 1);
+  fix_free(&f);
+
+  fix_init(&f, "let a = 1\n#\nlet b = 2\n");
+  while (lex_next(f.lx).kind != TOK_EOF) {
+    /* drain */
+  }
+  UNIT_EQ_INT(t, (int)diag_error_count(&f.sink), 1);
+  fix_free(&f);
+
+  /* Each genuinely bad byte is still reported once, separately. */
+  fix_init(&f, "# # #");
+  while (lex_next(f.lx).kind != TOK_EOF) {
+    /* drain */
+  }
+  UNIT_EQ_INT(t, (int)diag_error_count(&f.sink), 3);
+  fix_free(&f);
+}
+
 static void a_bad_byte_span_covers_the_whole_utf8_character(unit *t) {
   fixture f;
   const diag *d;
@@ -868,6 +898,8 @@ static const unit_case cases[] = {
      a_byte_that_begins_no_token_is_reported_and_skipped},
     {"a_bad_byte_span_covers_the_whole_utf8_character",
      a_bad_byte_span_covers_the_whole_utf8_character},
+    {"trivia_after_a_bad_byte_is_not_a_second_bad_byte",
+     trivia_after_a_bad_byte_is_not_a_second_bad_byte},
     {"the_documented_example_lexes_without_diagnostics",
      the_documented_example_lexes_without_diagnostics},
 };

@@ -601,6 +601,8 @@ static token scan_in_content(lexer *lx) {
 
 /* ---- normal mode ------------------------------------------------------- */
 
+static void skip_trivia(lexer *lx, bool *saw_newline, span *run);
+
 /* One token in normal mode. Trivia is already skipped. Loops rather than
  * recursing on an unexpected byte, so a long run of them costs no stack -- which
  * fuzz_lex will generate. */
@@ -749,6 +751,23 @@ static token scan_normal_token(lexer *lx) {
     lx->i += char_width(lx);
     LEX_REPORT(lx, DIAG_UNEXPECTED_CHAR, span_make(start, lx->i),
                "byte 0x%02x cannot begin a token", (unsigned char)c);
+
+    /* Whatever follows the bad byte is trivia again, and trivia is the caller's
+     * job -- it skips it once before this function is entered. Retrying without
+     * skipping reported the following space or newline as a second unexpected
+     * character, which is a false statement about both: `let a = 1 # 2` blamed
+     * the space at column 12 as well as the `#` at column 11.
+     *
+     * The newline bookkeeping is deliberately discarded. The caller has already
+     * decided this run's TOK_NEWLINE from the token before it, and D060 allows at
+     * most one per run, so a newline crossed while stepping over garbage belongs
+     * to a run whose decision is already made. */
+    {
+      bool ignored_newline;
+      span ignored_run;
+
+      skip_trivia(lx, &ignored_newline, &ignored_run);
+    }
   }
 }
 

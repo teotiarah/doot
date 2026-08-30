@@ -6,9 +6,9 @@ A request comes in. HTML goes out. That is the whole model.
 
 doot exists because building a small-to-mid-size web application currently requires assembling a stack — a runtime, a framework, a package tree, a database, a reverse proxy, a container, a deployment platform — none of which the application needed. For the 0 to 50,000 user range, a single box with SQLite is not a compromise. It is the correct architecture, and every distributed-systems concept imported into it is pure cost.
 
-> **Status: early implementation.** The base layer, the build, and the CI gates are in place, and the compiler front end — lexer, parser, AST, and the canonical printer behind `doot fmt` — is complete. The semantic pass, the VM, the server, and the stdlib are not started. The documents below are the specification, settled before the code that implements it. Decisions in [`docs/01-decisions.md`](docs/01-decisions.md) are locked and do not get revisited.
+> **Status: early implementation.** The base layer, the build, and the CI gates are in place; the compiler front end — lexer, parser, AST, and the canonical printer behind `doot fmt` — is complete; and the [specification suite](docs/11-spec-tests.md) that pins its behaviour is running. The semantic pass, the VM, the server, and the stdlib are not started. The documents below are the specification, settled before the code that implements it. Decisions in [`docs/01-decisions.md`](docs/01-decisions.md) are locked and do not get revisited.
 
-```do
+```do spec=tests/spec/docs/readme_chat.do
 type Msg {
   id:   int
   room: str
@@ -73,6 +73,7 @@ Requires a C99 compiler and nothing else.
 ```sh
 make            # -> build/debug/doot
 make test       # unit tests
+make spec       # specification tests, the primary suite
 make check      # everything CI runs
 make help       # every target
 ```

@@ -43,8 +43,8 @@ Keeping directives at the top, in a contiguous block, is what makes them findabl
 | --- | --- |
 | `doot-spec: <mode>` | how to run it — `check`, `run`, `fmt`, `routes` |
 | `expect-ok` | the command reported no diagnostics at all |
-| `expect-error: <CODE> at <line>:<col> "<message>"` | that exact code, position, and message |
-| `expect-warning: <CODE> at <line>:<col> "<message>"` | as above, at warning severity |
+| `expect-error: <CODE> [at <line>:<col>] "<message>"` | that exact code, position, and message |
+| `expect-warning: <CODE> [at <line>:<col>] "<message>"` | as above, at warning severity |
 | `expect-suggestion: <line>:<col>-<line>:<col> -> "<text>"` | a machine-applicable fix, span and replacement ([D038](01-decisions.md#d038)) |
 | `expect-fault: <CODE>` | a runtime fault of that kind |
 | `expect-fmt-stable` | `doot fmt` leaves the file byte for byte unchanged |
@@ -71,6 +71,15 @@ A mode whose command is absent from the binary produces exit code 2, which the r
 | the caret position | human output | **display columns**, with tabs expanded to four |
 
 A directive uses the middle one ([D073](01-decisions.md#d073)). `source_line_col` counts characters by skipping UTF-8 continuation bytes, so a line of CJK text or emoji advances one column per character, and a tab is one column regardless of how it renders. An author reading a column off the human caret output of a tab-indented file will write the wrong number, which is the entire reason this table is here.
+
+**`at <line>:<col>` is omitted when the diagnostic has no position.** The three source-intake codes are reported before the source object exists, so there is no line index to resolve an offset against and `--json` carries neither `file` nor `span` for them — the byte offset is in the message. Those expectations are written without a position:
+
+```do
+// doot-spec: fmt
+// expect-error: DT0003 "`nul_byte.do` contains a NUL byte at offset 118"
+```
+
+The runner matches presence-of-position as part of the tuple, so a positioned expectation never matches an unpositioned diagnostic or the reverse. Note that the path in such a message is a bare basename: the runner sets the working directory to the file's own, which is what keeps these messages identical across machines and build profiles.
 
 `expect-suggestion` is given as a **range**, because a fix is a span plus a replacement and getting the span's end wrong means replacing the wrong number of bytes:
 
@@ -133,6 +142,8 @@ There is **no per-test timeout** ([D077](01-decisions.md#d077)). ISO C `system()
 
 Output matches the unit harness: one line per directory, detail on failure only. A failure prints the expectations that were not met and the diagnostics that were not expected, as two lists.
 
+The runner is built and run under the sanitizers like every other suite, and it is **not** part of the `tidy` gate. That is deliberate rather than an oversight: `bugprone-command-processor` and `cert-env33-c` correctly flag the `system()` call [D066](01-decisions.md#d066) requires, and disabling them would stop flagging `system()` in `src/`, where it genuinely must never appear. `-Werror` with the project's full warning set, ASan, UBSan, LSan, and the runner's own negative fixtures cover it instead.
+
 ---
 
 ## Layout
@@ -179,11 +190,7 @@ Everything else is reachable from source bytes, invalid UTF-8 (`DT0001`) and an 
 
 **Every well-formedness rule with a registered code has both tests.** Described above.
 
-**A documented program matches its spec test byte for byte** ([D080](01-decisions.md#d080)). A fenced block that is a complete program carries the spec file it is pinned to in its info string:
-
-````
-```do spec=tests/spec/docs/chat.do
-````
+**A documented program matches its spec test byte for byte** ([D080](01-decisions.md#d080)). A fenced block that is a complete program carries the spec file it is pinned to in its info string, as `` ```do spec=tests/spec/docs/chat.do ``.
 
 The gate compares the block against that file **with its leading directive block removed**, since the spec file carries directives the documentation does not. Fragments — `s.len`, a bare signature, a single `let` — are unmarked and unchecked; they cannot parse standalone, and inventing surrounding context to make them checkable would test something the documentation does not actually say. GitHub highlights on the first word of an info string and ignores the rest, so the marker costs nothing in rendering.
 
@@ -199,6 +206,16 @@ When `stream` lands, the whole program becomes valid, the spec file gains `expec
 
 ## What has files today
 
-`fmt` mode only, per the implementation order in [D067](01-decisions.md#d067). Every lexical and syntactic diagnostic the front end emits is reachable through `doot fmt`, which is what makes the suite possible before the typechecker exists.
+`fmt` mode only, per the implementation order in [D067](01-decisions.md#d067). Every lexical and syntactic diagnostic the front end emits is reachable through `doot fmt`, which is what makes the suite possible before the typechecker exists — all forty-six codes that describe source text are produced here, and the gate above enforces it.
 
-`check` files arrive with the resolver and the typechecker, `run` and `expect-output` and `expect-fault` with the VM, `routes` with the route table, and `expect-warning` with the first warning code — there are none yet, since all fifty registered codes are errors.
+`check` files arrive with the resolver and the typechecker, `run` with the VM, and `routes` with the route table.
+
+Three directives are implemented and deliberately unexercised, because nothing can reach them yet, and each is named here so the gap is a known one rather than a discovered one:
+
+| Directive | Waiting on |
+| --- | --- |
+| `expect-warning` | the first warning code — all fifty registered codes are errors |
+| `expect-suggestion` | the first machine-applicable fix. `diag_fix` and the JSON `suggestion` field both work and are unit-tested, but no lexer or parser diagnostic calls it; the naming diagnostics in [D069](01-decisions.md#d069) are the first that will |
+| `expect-fault` | the VM, since a fault is a runtime event |
+
+That they parse and are rejected when malformed is covered; that they *match* is not, and cannot be until there is something to match. The runner's fail-closed behaviour is what keeps the gap safe in the meantime: a file using one of them today produces a failure, not a pass.
