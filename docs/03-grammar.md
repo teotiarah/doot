@@ -317,6 +317,29 @@ A `<form method="post">` element gains a hidden CSRF token automatically ([D028]
 
 Each has an assigned diagnostic code. Rules **1, 9, 10, 11, and 12** need only syntactic context and are enforced by the parser, with codes allocated in [10-frontend.md](10-frontend.md#which-well-formedness-rules-the-parser-discharges); the rest need names, types, the route table, or control-flow analysis and are enforced after parsing, in the resolver and typechecker ([D064](01-decisions.md#d064)).
 
+Every rule has an **accepting and a rejecting spec test** ([D049](01-decisions.md#d049)), named `rule_NN_<slug>_ok.do` and `rule_NN_<slug>_err.do` in `tests/spec/rules/`. The table below is what makes that mechanical rather than aspirational: `tools/check-docs.sh` reads it and requires both files for every rule whose codes are registered in `src/base/diag_codes.h`, so coverage grows as codes land ([D078](01-decisions.md#d078)). A code in brackets is reserved but not yet registered.
+
+| Rule | Slug | Codes |
+| --- | --- | --- |
+| 1 | `toplevel_let` | `DT0033` |
+| 2 | `assign_target_var` | [`DT0300`] |
+| 3 | `propagate_fallible` | [`DT0400`] |
+| 4 | `else_optional_fallible` | [`DT0401`] |
+| 5 | `route_pattern_params` | [`DT0500`] |
+| 6 | `request_binding_struct` | [`DT0501`] |
+| 7 | `route_conflict` | [`DT0502`] |
+| 8 | `match_exhaustive` | [`DT0402`] |
+| 9 | `method_self_first` | `DT0034` |
+| 10 | `send_in_stream` | `DT0035` |
+| 11 | `self_in_method` | `DT0036` |
+| 12 | `break_continue_in_loop` | `DT0037`, `DT0038` |
+| 13 | `sql_against_schema` | [`DT0100`] |
+| 14 | `module_path_collision` | [`DT0101`] |
+| 15 | `spawn_captures_immutable` | [`DT0301`] |
+| 16 | `else_block_diverges` | [`DT0403`] |
+
+The bracketed numbers are the first code in each rule's range, chosen by category per [06-tooling.md](06-tooling.md#code-ranges), and are reservations in the sense of [D065](01-decisions.md#d065): the number is decided here so two workstreams cannot collide on it, and the registry row is written later, with the code that emits it and the test that proves it.
+
 1. A top-level binding must be `let`, never `var`.
 2. An assignment target must resolve to a `var` local; parameters and `let` bindings are immutable, transitively.
 3. `!` may only be applied to an expression of fallible type, and only inside a function whose return type is fallible or which handles it with `else`.
