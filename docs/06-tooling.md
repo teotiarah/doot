@@ -132,6 +132,8 @@ The `suggestion` field is a machine-applicable edit — a span and a replacement
 | `DT0900`–`DT0999` | runtime faults |
 | `DT1000`–`DT1099` | driver, CLI, and I/O |
 
+A range is a **subject**, not a pipeline stage, so a code lives with what it is about rather than with whatever stage happens to notice it. Each range is sub-allocated in full, in advance, in the document that owns it: `DT0001`–`DT0099` in [10-frontend.md](10-frontend.md#front-end-diagnostics) ([D064](01-decisions.md#d064)), and `DT0100`–`DT0699` in [12-semantics.md](12-semantics.md#semantic-diagnostics) ([D100](01-decisions.md#d100)).
+
 ### `doot doc --agent`
 
 Emits a compact, complete language and stdlib reference sized to drop into an agent's context window: every keyword, every construct with one example, every stdlib signature, and the twenty most common mistakes with their corrections.
@@ -148,7 +150,7 @@ Fixed choices: two-space indentation; no semicolons; no trailing whitespace; one
 
 Naming is enforced, not suggested: modules `lower`, types `PascalCase`, functions and fields `snake_case`, enum variants `snake_case`, constants `snake_case` (there is no separate constant case, because there are no globals to distinguish).
 
-It is enforced by **`doot check`, not by `doot fmt`** ([D069](01-decisions.md#d069)). A formatter cannot rename: renaming changes what the code means and requires rewriting every use site, which is refactoring rather than formatting. `doot fmt` therefore reports nothing about names, and the checker reports a violation with the correct spelling as a machine-applicable suggestion.
+It is enforced by **`doot check`, not by `doot fmt`** ([D069](01-decisions.md#d069)). A formatter cannot rename: renaming changes what the code means and requires rewriting every use site, which is refactoring rather than formatting. `doot fmt` therefore reports nothing about names, and the checker reports a violation with the correct spelling as a machine-applicable suggestion. The exact patterns, and the one violation that cannot carry a suggestion because it names a file rather than a span, are in [12-semantics.md](12-semantics.md#naming-rules) ([D086](01-decisions.md#d086)).
 
 **Line structure inside markup and argument lists is preserved, not decided** ([D068](01-decisions.md#d068)). Everything else is canonical — indentation, spacing, parentheses, void elements, blank lines, field alignment — but the printer never adds or removes a line break inside a markup literal or an argument list, because whitespace between elements is rendered content and because a formatter with no wrapping rule must not join a line the author broke.
 

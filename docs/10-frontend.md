@@ -2,7 +2,7 @@
 
 Implementation specification for the lexer, the parser, the AST, the front-end diagnostics, and the printer. Decisions are recorded as [D056](01-decisions.md#d056)–[D069](01-decisions.md#d069). The specification-test suite that exercises all of it is [11-spec-tests.md](11-spec-tests.md).
 
-This document covers the first three stages of the pipeline in [05-runtime.md](05-runtime.md#compiler-pipeline) and stops there. The resolver, the typechecker, the schema checker, the register allocator, and the emitter are specified in a later pass, as are the opcode table, the native-call ABI, the frame-map encoding, and the runtime value layout. Nothing here depends on those, which is the point: the front end is the part of the compiler that can be settled and finished while the back end is still open.
+This document covers the first three stages of the pipeline in [05-runtime.md](05-runtime.md#compiler-pipeline) and stops there. The resolver, the typechecker, the schema checker, and the route checker are [12-semantics.md](12-semantics.md); the register allocator and the emitter are specified in a later pass, as are the opcode table, the native-call ABI, the frame-map encoding, and the runtime value layout. Nothing here depends on any of those, which is the point: the front end is the part of the compiler that can be settled and finished while the back end is still open.
 
 Three defects in the frozen line-structure rule surfaced while writing this, and are corrected in [03-grammar.md](03-grammar.md#line-structure) under [D060](01-decisions.md#d060).
 

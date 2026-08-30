@@ -826,3 +826,312 @@ The hole this closes was real. [10-frontend.md](10-frontend.md#idempotence) call
 Fragments stay unmarked and unchecked. A bare signature or a single expression cannot parse standalone, and inventing the surrounding context needed to make it checkable would test something the documentation does not say.
 
 *Consequence:* in v0.1 the chat program is pinned for byte-equality and for its exact diagnostic set — three `DT0046`s for `stream` and `send` — but not for formatting, since `doot fmt` refuses a file with errors. Its formatting stays covered by the unit test over the subset v0.1 accepts, and when `stream` lands in [v0.2](07-roadmap.md#v02--realtime) the spec file gains `expect-fmt-stable` and that unit test is deleted. A dated gap, recorded, rather than a forgotten one.
+
+
+---
+
+## Semantic pass
+
+The resolver, the typechecker, the schema checker, and the route checker, argued here and specified in [12-semantics.md](12-semantics.md). These are the decisions that had to be settled before any semantic-pass code could be written, and they are settled in one pass so that the implementation never has to stop and decide something.
+
+### D081
+**Four sequential stages — resolver, typechecker, schema checker, route checker — with a barrier between each: a stage runs only if every earlier stage reported no errors.** · locked
+
+The stage list and its order are [05-runtime.md](05-runtime.md#compiler-pipeline)'s. What is decided here is that they are genuinely separate walks rather than one fused pass, and that an error in one stops the next.
+
+The boundaries are not arbitrary. A name must be bound before its type can be asked for, and every rule the resolver owns — visibility, naming, mutability — needs only *which declaration a name refers to*. Mutability is the surprising member of that list and belongs there for exactly that reason: [D008](#d008) is a property of a binding, not of a type. The last two stages, however, depend on the resolver and **not** on the typechecker, which the pipeline's order does not suggest and which is worth stating: the typechecker never needs a prepared statement, because [D019](#d019)'s explicit type argument already gives `db.all[Msg](...)` the type `[Msg]!`, and the schema checker never needs an inferred type, because the fields it maps a row into are declared and the one check that would need one is reported by the typechecker, which is visiting every argument anyway. So the order among the last three is [05-runtime.md](05-runtime.md#compiler-pipeline)'s rather than a dependency, and what it buys is the barrier below — plus two things that turn out to be load-bearing: the schema checker and the typechecker can be built concurrently ([D102](#d102)), and `doot routes` can run the resolver and the route checker alone and still be a complete command ([D101](#d101)).
+
+The barrier is the part worth arguing. Within a stage, checking continues after an error, so a run reports every independent problem — the same reason the parser recovers. Across stages it stops, because a type error derived from a name that did not resolve is not a second finding but the same finding restated about the wrong thing. `diag_sink` truncates past its limit, so a cascade does not merely add noise, it evicts the diagnostic that explains it. And [D038](#d038) exists so that an agent can act on `doot check --json` directly; an agent handed forty consequences and one cause will fix a consequence.
+
+*Rejected:* fusing the resolver and typechecker into one walk, which is the conventional design and is cheaper by one traversal. It costs the barrier — once types are computed while names are still being bound, there is no point at which "all names resolved" is true — and it makes the two stages one workstream instead of two.
+
+*Consequence:* a program with a misspelled name needs a second `doot check` run to reveal its type errors. Paid once per class of mistake, in exchange for output in which every diagnostic is about code the author wrote.
+
+*Consequence:* each stage is one walk of the unit with every check it owns performed at the node it applies to, not one walk per rule. That is for diagnostic ordering rather than speed: a single walk reports a function's problems together, and a per-rule walk reports every instance of rule A across the program and then every instance of rule B.
+
+### D082
+**The symbol table is arena-allocated symbols in intrusive scope lists, with linear lookup, and the two scopes large enough to matter are sealed and indexed after they stop growing.** · locked
+
+`symbol` carries a kind, a name, its declaring span and file, `pub`, mutability, a used flag, a type slot — its declared type, resolved from its `type_ref`, or `NULL` for a local whose type the typechecker infers — and a `next` pointer; `scope` holds `{ first, last, count }` and a parent. This is the shape [D063](#d063) chose for every AST child list and the base layer already uses for `diag_label`, and it is chosen for the same reason: `arena_extend` grows only the arena's most recent allocation, so a contiguous array cannot be built while its elements are themselves being allocated.
+
+Lookup is a linear walk of the chain and of each scope's list, which is correct for the sizes involved — a function body holds a handful of locals and a chain is a handful deep — and a hash table would need the resize strategy the arena deliberately does not have ([D047](#d047)).
+
+Two scopes are big: the unit scope, and a struct's field list. Both are **built once and then never extended**, so each is **sealed** after its last insertion — one arena block holding an open-addressing index sized to the next power of two above `count`. Sealing is what makes the linear default honest rather than a shrug: the scopes that keep growing stay linear because they are small, and the scopes that are large stop growing before anything searches them.
+
+*Rejected:* a hash table for every scope (a resize inside an arena means either leaking the old table, which is free but unbounded, or a second allocator); interning every name into a global string table and comparing pointers (a real win in a compiler with many compilation units, and doot has exactly one, so `slice_eq` over short names is already what the comparison costs).
+
+### D083
+**Declarations are visible everywhere in the unit; locals are visible only after their own declaration. Shadowing within a function is an error, shadowing a predeclared or top-level name is a warning, and a leading underscore marks a binding as deliberately unused.** · locked
+
+Compilation is whole-program with no imports ([D029](#d029), [D030](#d030)), so a **collect** step runs before any body is resolved: it derives every file's module path from its filesystem path, creates the module namespaces, fills a file scope with every top-level declaration, and attaches methods, fields, and variants to their types. Forward references across the unit therefore work in every direction, which is forced rather than chosen — there is no import to establish an order and no header to declare one.
+
+Locals are the exception and bind from the statement after their `let`. There is no hoisting, and the consequence is worth stating: a lambda bound to a local cannot call itself, because its own name is not yet in scope. A recursive function is a top-level `fn`, which collect made visible everywhere.
+
+The three shadowing rules:
+
+- **Redeclaration in one scope** is an error, with a label at the first declaration.
+- **Shadowing another binding of the same function** — a local, parameter, `self`, loop variable, or `err` binding in any enclosing scope up to the function's own — is an error. Sibling scopes do not shadow, so two `for u in ...` loops in one body are fine. A lambda is *not* a fresh function for this rule: its parameters participate, because a parameter spelled like a captured local is precisely the case that reads wrongly.
+- **Shadowing a predeclared name or a top-level name** is permitted with a warning. It cannot be an error, because [02-syntax.md](02-syntax.md#keywords) declares type names and stdlib module names to be predeclared identifiers that "may be shadowed in a local scope". It is warned because the failure mode is otherwise baffling: after `let time = "12:00"`, `time.now()` is a field access on a `str` and every diagnostic that follows is about `str`.
+
+A name beginning with `_` is exempt from the unused-binding warnings, and `_` alone is the anonymous form — the one name that may be bound repeatedly in a scope, and referring to it is an error. The grammar admits a leading underscore, so the checker has to give it a meaning or reject it, and "deliberately unused" is the meaning that makes `for _, u in users` writable. Without it, an unused-binding warning would be unsilenceable, which is how a warning gets switched off.
+
+*Rejected:* permitting shadowing within a function silently, as most languages do. Goal 2 is that unambiguous beats terse, and a name that means one thing everywhere in a function is a property a reader can rely on without tracking which block they are in; the fix is a rename, which is mechanical. *Also rejected:* forbidding shadowing of a stdlib module, which [02-syntax.md](02-syntax.md#keywords) has already promised is allowed.
+
+### D084
+**A dotted name resolves by longest namespace prefix, a lexical binding always wins, and a path may not be both a namespace and a member.** · locked
+
+[D063](#d063) makes a dotted name one `EXPR_IDENT` holding the whole path and leaves the split to the resolver. The algorithm, over segments `s1 … sn`:
+
+1. If `s1` is found in the lexical chain — locals, parameters, `self`, loop variables, `err`, `req`, then the file scope — the binding is `s1` alone and everything after it is a member access. **A lexical binding wins at any depth over any namespace**, which is what makes `u.name` a field access and what makes [D083](#d083)'s shadowing warning necessary rather than decorative.
+2. Otherwise take the **largest** `k` such that `s1 … sk` names a namespace. If `k == n`, the path is a module and not a value, which is its own diagnostic. Otherwise `s1 … s(k+1)` must name a member of that namespace and is the binding, with the rest member accesses. A missing member and a member that exists but is not `pub` are different mistakes and get different messages.
+3. In type position the same walk runs against types, so `time.Time` is namespace `time`, member type `Time`.
+
+Step 2 is unique and needs no backtracking only because of one added well-formedness requirement: **a path may not be both a namespace and a member.** A file `models/user.do` and a directory `models/user/` both claim `models.user`, and that is an error rather than a precedence question. Deciding it by precedence would mean a reader has to know which files exist to know what `models.user.find` means, which is exactly what [D030](#d030) removed by deleting imports.
+
+*Rejected:* resolving the shortest prefix that names anything and treating the rest as members, which fails on `models.user.find` because `models` alone names a namespace and has no member `user` in the value sense; *also rejected:* requiring a marker to separate module path from member access, which is an import statement wearing a different hat.
+
+*Consequence:* `Status.active` takes step 1, since `Status` is a type symbol, and a member access on a type resolves to an enum variant and nothing else. See [D092](#d092).
+
+### D085
+**The standard library and the prelude are one compile-time signature table, and a member of a module whose version has not landed reports `DT0046`.** · locked
+
+One X-macro, in the same form as the diagnostic registry ([D050](#d050)) and the reserved-word table ([D062](#d062)), carrying per member: the module, the name, the signature with its `!` and `?` marks, any type-argument slots, whether it mutates its receiver ([D097](#d097)), and the release it lands in. The prelude is the same table's unqualified half — the seven predeclared type names from [02-syntax.md](02-syntax.md#keywords) plus `Error`, `ErrorKind`, `Request`, `Response`, `redirect`, and `Upload`, all of which the documentation already uses unqualified.
+
+Two of its properties are load-bearing rather than incidental. `ErrorKind`'s variant set is **closed and known at compile time**, which is what makes `match err.kind` decidably exhaustive — a benefit of [D014](#d014)'s single universal error type that only shows up here. And `html.raw` is **the only member taking `str` and returning `html`**, which is what makes `grep raw(` the complete XSS audit [04-stdlib.md](04-stdlib.md#html) promises; the type rules close every other route between the two.
+
+**Reaching a module whose version has not landed reports `DT0046`**, the code the parser already uses for `spawn`, `send`, and `stream`. The situation is identical — correct, final syntax for a feature that arrives later — and a second code would need a second explanation saying the same thing. So `topic.publish` in v0.1 reports `DT0046` naming v0.2, exactly as `send` does.
+
+*This is not a stub, and the distinction matters under [D054](#d054).* A module's compile-time half is a complete artifact that `doot check` genuinely uses, and it has to exist before the runtime half, because [D033](#d033) promises SQL is checked at compile time and that is unimplementable without `db`'s signatures. A stub would be an entry for a module the project has not decided on, and there are none: the set is closed at thirty-eight.
+
+*Consequence:* the table is on the critical path for every checker, because no checker can be tested against a program that calls a module the table does not describe. Its format is therefore the first thing the semantic pass fixes, and filling it in is a workstream of its own ([D102](#d102)).
+
+### D086
+**Naming rules are checked with exact patterns whose corrected spelling is derivable, and every violation carries a machine-applicable rename — except a module name, which has no span.** · locked
+
+[D069](#d069) moved the rules from the formatter to the checker and left their spellings as the four words in [D039](#d039). The patterns: module path segments `[a-z][a-z0-9_]*`; types one or more `[A-Z][a-z0-9]*` segments; everything else `[a-z][a-z0-9]*(_[a-z0-9]+)*` with an optional single leading `_`.
+
+`PascalCase` therefore forbids two adjacent capitals: `UserId`, not `UserID`; `Url`, not `URL`. That is stricter than a human needs and exactly as strict as a machine needs, because it makes **the correct spelling derivable from the wrong one** — split on underscores and on each transition into a capital or out of a run of capitals, then recase. A rule that cannot derive the fix can only describe it, and [D069](#d069) promised a machine-applicable suggestion.
+
+**A module name is the exception and carries no fix.** It lives in the filesystem, so correcting it is a file rename rather than a text edit, and there is no span in any `.do` file to attach an edit to; the diagnostic is reported with no position at all — the shape [D073](#d073) established for the source-intake codes — and names the correct spelling in its message.
+
+Violations are **errors**, following the general severity rule this pass adopts: **a warning is for code the language permits and considers redundant or suspicious; anything the language forbids is an error.** [D069](#d069) says the rules are enforced rather than suggested, so they are errors, and a redundant `else` arm is a warning.
+
+*Consequence:* the naming codes are the first machine-applicable fixes in the compiler and therefore the first producers of `expect-suggestion`, which has been implemented and unexercised since the spec suite landed ([D073](#d073)).
+
+### D087
+**Named types are nominal; optionality is a flag on a type, not a wrapper; fallibility is a property of an expression, not a type; and recursion must pass through an indirection.** · locked
+
+Four properties of the type representation, each of which settles a question that would otherwise recur.
+
+**Nominal.** A struct or enum is identified by its symbol, never by its shape, so two structurally identical structs are different types. [D009](#d009)'s structural equality is about comparing values of one type, not about deciding what a type is. Nominal identity also makes type equality terminate on a recursive type with no visited set, because the recursion stops at the name.
+
+**Optionality is a flag.** `T??` does not exist — applying `?` to an optional yields the same type. This follows the AST, where `type_ref.optional` is already a `bool`, and it deletes nested optionals and therefore the question of how many `else`s unwrap one.
+
+**Fallibility is not a type.** There is no `T!`, because [D014](#d014) has one universal `Error` and no `Result[T, E]`. What the typechecker carries beside each expression's type is a `fallible` bit, set by a call to a `!` function and cleared by `!` or `else`. A function *type* records it, because a signature must; a value never does.
+
+**Recursion needs an indirection.** `type Node { next: Node? }` and `type Tree { kids: [Tree] }` are fine, because an optional struct, a list, and a map are all pointers in a slot ([05-runtime.md](05-runtime.md#values)). `type Node { next: Node }` has no finite layout and is an error naming the cycle.
+
+Additionally, **a type alias is transparent**: `type Id = int` is another spelling of `int`. A nominal alias would be a distinct type with no constructor and no conversion, since there are no generics and no newtype ceremony to give it either, so transparency is the only reading that leaves the feature usable.
+
+*Rejected:* structural typing for structs, which would make `User` and `Admin` interchangeable whenever their fields happened to line up — a silent hazard in exactly the code that maps database rows; *also rejected:* a `nil` type or a bottom type, which would let `let x = nil` acquire a type nobody wrote. `nil` is a literal with no principal type, and using it without an expected type is a diagnostic naming the annotation to add.
+
+### D088
+**Assignability is nominal identity plus widening into an optional, and nothing else. There are no implicit conversions.** · locked
+
+`assignable(from, to)` holds when they are the same type, or when `to` is optional and `from` is that type without the flag, or when `from` is `nil` and `to` is optional.
+
+No `int` to `float`, no `float` to `int`, no `str` to `html`, no `T` to `any`, no `any` to `T`, no enum to `int`. Every conversion doot has is written with `as` and the set of those is closed ([D089](#d089)). Mixed arithmetic is an error with a fix, not a promotion: silent widening is how a monetary calculation in [D020](#d020)'s integer cents becomes a float.
+
+The direction deliberately absent is `T?` to `T`. Unwrapping is `else` ([D017](#d017)), and an optional used where a value is required gets its own code rather than the general mismatch, because the fix is `else` and naming it is what makes the message actionable rather than descriptive.
+
+*Rejected:* implicit `int` to `float` widening, which every C-family language has and which is the one conversion users will miss. It is also the one that turns [D003](#d003)'s checked integer arithmetic into unchecked float arithmetic without anything appearing in the source.
+
+### D089
+**`as` is a closed, total table, and where a conversion can be refused its result is optional rather than fallible.** · locked
+
+The whole table: `int` to `float`; `float` to `int`, truncating toward zero and faulting on NaN, infinity, or an out-of-range value; any type to `any`, boxing; `any` to `T`, yielding `T?`; `str` to `bytes`; `bytes` to `str`, yielding `str?`; an enum to `int`, its ordinal. Anything else is a diagnostic naming the alternative.
+
+Making the refusable conversions **optional-returning** rather than fallible or faulting is what keeps `as` out of the error model: `let n = v as int else 0` handles a failed cast with the mechanism the language already has, and no cast needs a `!`. `float as int` is the exception and faults, because it is arithmetic, and [D003](#d003) already decided that arithmetic which cannot produce a right answer is a fault rather than a value to check.
+
+**`any` supports `as` and nothing else** — no indexing, no field access, no arithmetic, no comparison. Navigating a decoded JSON document means casting to `{str: any}` or `[any]` first. Letting operations through `any` would put back into the interpreter the runtime type check [D002](#d002) removed from it, on the one type that carries a tag.
+
+**`str as html` gets its own code**, whose message names `html.raw`. It is the one impossible cast worth a code of its own, because it is what an author reaches for immediately before creating an XSS hole, and the diagnostic is the last place to say so.
+
+*Rejected:* `as` as a general formatting operator (`n as str`), which duplicates `str.from_int` and would make the table open-ended; *also rejected:* a fallible `as` marked `!`, which would put casts into the error model and make every JSON field access a propagation site.
+
+### D090
+**Checking is bidirectional, and six expression forms are legal only against an expected type.** · locked
+
+`infer(expr)` and `check(expr, expected)`, with an expected type flowing inward from an annotation, a parameter, a field, an enclosing collection's element type, a return type, or the left side of a value-form `else`.
+
+That is what makes the documented forms work with no annotation: `let xs: [int] = []`, `let u: User? = nil`, `let s: Status = .active`, `f(.active)`. The six forms with no principal type — empty list, empty map, `nil`, a bare `.variant`, a literal whose elements disagree, and a lambda with no declared return type that returns nothing on some path — are diagnostics naming the annotation to write when no expected type exists.
+
+**Annotations are mandatory in every declaration position**: parameters, fields, return types, route parameters. There is no inferred signature anywhere in the language, which is what lets the collect step build the entire symbol table with types attached before any body is walked — and therefore what makes whole-program forward references cost one pass rather than a fixed point.
+
+*Rejected:* full Hindley–Milner inference over the unit, which would infer signatures too and is a poor fit for a language whose goal 2 is that code be readable without consulting an inference engine; *also rejected:* requiring an annotation on every local, which [D015](#d015) already decided against.
+
+### D091
+**There is no truthiness, and an expression statement must be able to have an effect.** · locked
+
+The condition of `if`, `while`, and a markup `{if}`, and both operands of `and` and `or`, must be exactly `bool`. `if u.bio` is an error and `if u.bio != nil` is the spelling. Comparing two different types is a diagnostic rather than a constant `false`, so `id == "3"` is caught rather than always failing at runtime.
+
+The grammar permits `expr NEWLINE` as a statement, and the typechecker accepts it only when the expression is a call, or a `!` or `else` over one. `total + 1` as a statement is an error. Discarding a call's return value is fine; discarding a *fallible* call's result is not, because [D013](#d013) requires `!` or `else` whether or not the value is wanted.
+
+Both rules exist for the same reason: they turn a class of agent-written mistake — a condition that is a value, a line that was meant to be an assignment — from silent behaviour into a diagnostic with an obvious fix. Truthiness in particular is a rule a reader has to memorize per type, and goal 1 does not allow one.
+
+### D092
+**A method attaches only to a type this program declares, is declared in the same file as its type, and has no static form.** · locked
+
+Four rules and one consequence.
+
+- **Only a struct or enum declared in this program** may receive a method: not a primitive, not `html`, not `[T]`, not a stdlib type, not an alias's target. The stdlib is closed ([D029](#d029)), and if user code could attach to `str`, then reading `s.upper()` would require knowing which files are in the project — which is exactly the "where is this method actually defined" question [D016](#d016) exists to answer.
+- **In the same file as its type**, which makes "beside the type, always" the complete answer to that question, and makes a type's method list a per-file fact the collect step establishes rather than a whole-program search.
+- **A method's name may not collide with a field** of its receiver, so a member access never has to choose between a field of function type and a method.
+- **`pub` on a method is an error.** A method's visibility is its type's — redundant when the type is `pub`, meaningless when it is not.
+
+**There is no static method form in v0.1.** `fn User.guest() -> User` cannot be written, because [03-grammar.md](03-grammar.md#well-formedness-rules) rule 9 requires `self` as the first parameter and `DT0034` is registered and tested. A member access on a type name therefore resolves to an enum variant and to nothing else, and a value is constructed by a free function.
+
+*This corrects an illustration rather than a decision.* [D013](#d013) and [02-syntax.md](02-syntax.md#errors) both write `find(id) else User.guest()`, which rule 9 makes undeclarable. The rule as written wins — it is registered, tested, and load-bearing for [D016](#d016)'s no-classes claim — and the doot spelling of that example is a free function returning a `User`. Found while specifying path resolution against the documented examples, which is the point of specifying it first.
+
+*Rejected:* permitting a receiver-typed function with no `self` as a static constructor, which would reverse rule 9; *also rejected:* allowing methods on stdlib types, which is the extension method feature, and whose cost is that the meaning of a call depends on which files are present.
+
+### D093
+**A lambda captures immutably, always, and infers its return type and its fallibility when both are omitted.** · locked
+
+Every name a lambda reads from an enclosing scope is captured by value and is immutable inside the body; assigning to a captured binding is an error. This is not a `spawn`-specific rule and is not relaxed away from `spawn`: it keeps a `var` local's ownership genuinely unique, which is what lets `xs.push(x)` mutate in place ([D008](#d008)), and it means moving a loop body into a lambda can never quietly introduce aliasing. Accumulating into an outer `var` is a `for` loop.
+
+A lambda with **no declared return type infers both the type and the fallibility** from its body — from the expression in the `=> expr` form, and from the agreeing `return` statements in the block form. This is forced by the documentation: `db.tx(fn() { db.exec(...)! })!` declares no return type on the lambda and propagates inside it, so a lambda that could not become fallible by inference would make the documented transaction unwritable. A lambda that *does* declare a return type must declare `!` as well if its body propagates.
+
+`return` inside a lambda returns from the lambda; `!` inside one propagates to the lambda's own signature and says nothing about the enclosing function.
+
+*Consequence:* [03-grammar.md](03-grammar.md#well-formedness-rules) rule 15 becomes narrow rather than a separate analysis. Since captures are already immutable everywhere, the only way for `spawn` to reach a mutable binding is a `var` local passed directly as an argument, and that is what rule 15's code reports.
+
+*Rejected:* mutable capture with a `var` closure, which is what most languages do and which reintroduces the aliasing [D008](#d008) removed, at the one place — a closure handed to another task — where it is least visible.
+
+### D094
+**`else` handles fallibility and optionality together, and `else err` is refused when both are present.** · locked
+
+`else` requires its left operand to be fallible or optional or both, and clears everything it finds: the result is the left type with the optional flag and the fallible bit both cleared. `!` clears only fallibility, so `db.find[User](...)!` is a `User?`, exactly as [02-syntax.md](02-syntax.md#data-access) documents.
+
+The binding form is where handling both at once needs a rule. On a fallible operand, `else err` binds an `Error`. On an operand that is only optional, `else err` is an error, because there is no error to bind. On an operand that is **both** — `T?!`, which `db.find` returns — `else err` is an error naming the fix: write `!` first, then `else`.
+
+That last case is the whole reason this is a decision. There are two distinct reasons to take the branch and only one of them has an `Error`, so binding `err` would either lie about the nil case or need a nested optional [D087](#d087) does not have. Forcing `db.find(...)! else err { ... }` costs one character and separates two failures the author wanted handled separately. Refusing rather than inventing a semantics is the move [D017](#d017) made against `?.`.
+
+Separately, **a fallible expression must be handled immediately**: `!` and `else` are the only two contexts one may appear in. That is the teeth in rule 3, and it is what makes error handling verifiable by eye — a call to a `!` function is followed by a `!` or an `else` on the same line, or the program does not compile.
+
+*Consequence:* `!` requires the enclosing function to be fallible, and at the top level of a file there is no enclosing function, so `!` in a top-level `let` initializer is an error. The spelling that works there is `else` with a value, which is what `env.get("NAME") else "default"` in [02-syntax.md](02-syntax.md#configuration) already is.
+
+*Consequence:* `coalesce_form` in the AST is read directly rather than re-derived, which is what it was added for ([ast.h](../src/parse/ast.h)).
+
+### D095
+**One divergence-and-reachability analysis serves rule 16, the missing-return check, and the unreachable-code warning.** · locked
+
+A statement diverges when control cannot continue past it: `return`, `break`, and `continue`; an `if` with an `else` whose every branch diverges; a `match` that is exhaustive and whose every arm diverges; a `while true` containing no `break` for it; a block containing any diverging statement.
+
+That single definition answers three questions that would otherwise be three analyses: whether the block form of `else` diverges on every path ([03-grammar.md](03-grammar.md#well-formedness-rules) rule 16), whether a function with a return type can finish without returning, and whether a statement following a diverging one is reachable. Writing it once means the three cannot disagree, which they would eventually, in the `match` case.
+
+Rule 16 also says "or a fault", and no expression in v0.1 is statically known to fault: there is no `never` type and no function that cannot return. The structural list is therefore complete, and complete in the direction that matters — it never accepts a block that can fall through.
+
+*Consequence:* unreachable code is a warning rather than an error, reported once at the first unreachable statement with the diverging statement as a related label. It is code the language permits and considers pointless, which is what [D086](#d086)'s severity rule makes a warning.
+
+### D096
+**Markup value typing closes every path from `str` to `html` except `html.raw`, refuses `html` in an attribute value, and requires a `<form>`'s method to be written literally.** · locked
+
+[D021](#d021)'s soundness claim — XSS is impossible unless the author writes `html.raw(s)` — holds only if every path between the two types is shut. There are exactly four, and the type rules close all four: assignability is nominal identity ([D088](#d088)); `as` refuses it with a dedicated diagnostic ([D089](#d089)); a text interpolation is always escaped; an attribute interpolation is always attribute-escaped. So `html.raw` is the only entry point, which is what makes `grep raw(` the complete audit [04-stdlib.md](04-stdlib.md#html) promises.
+
+Text position accepts a renderable type — `str`, `int`, `float`, `bool`, `html`, `[html]`, and their optionals, with `nil` rendering as nothing per [03-grammar.md](03-grammar.md#semantics). Attribute-value position accepts `str`, `int`, and `float`; a `bool` or an optional only as the *entire* value, where it controls whether the attribute is emitted at all; and **`html` never**. Refusing `html` in an attribute is not conservatism: a value of type `html` was escaped for *text*, and using a text escape in an attribute is the bug this type exists to prevent.
+
+**A `<form>` whose `method` attribute is interpolated is an error.** [D028](#d028) injects a CSRF token into every state-changing form, and the compiler can only do that if it can see the method. Without the check, `<form method="${m}">` would silently produce an unprotected form — a security default failing quietly, which is the outcome [D028](#d028) shipped in v0.1 to avoid.
+
+Element and attribute *names* are not validated against an HTML vocabulary. HTML is extensible — `data-*`, `aria-*`, custom elements — so a closed vocabulary would reject valid pages, which is worse than accepting a typo in a tag name. Only the void-element list is known, and it is already the parser's.
+
+*Consequence:* string interpolation is deliberately narrower than markup interpolation. `"${e}"` accepts `str`, `int`, `float`, and `bool`, and refuses `html` and optionals. [03-grammar.md](03-grammar.md#semantics) says `nil` renders as nothing *in markup* and nothing says it anywhere else; turning an absent value into an empty string is the invisible failure [D017](#d017) rejects `?.` for.
+
+### D097
+**Mutating standard-library members are declared in the module table, so deep `let` is checkable rather than aspirational.** · locked
+
+[D008](#d008) makes `let` deeply immutable, and the assignment half of that is easy: an lvalue is always rooted at one name ([03-grammar.md](03-grammar.md#statements)), so the root must resolve to a `var` local and the depth of the path is irrelevant — which is exactly what "deeply immutable" means.
+
+The other half has no lvalue at all. `xs.push(x)` mutates in place, so `let xs = ["a"]` followed by `xs.push("b")` must be refused, and nothing in the syntax says `push` mutates. The module table ([D085](#d085)) therefore carries a **mutating** column, and calling a mutating member requires the receiver's root binding to be a `var` local.
+
+Without that column, the deep-`let` guarantee would hold for assignment and leak through every mutating method in the standard library — which would make it not a guarantee, and would make [D004](#d004)'s frozen-tier promotion and [D008](#d008)'s "no aliasing anywhere" unsound in the same stroke.
+
+*Consequence:* `self` is a parameter and therefore immutable, so a method cannot assign to `self` or through it. Its own code, because the fix is `with` rather than `var`.
+
+### D098
+**The schema is derived by replaying migrations into an in-memory database, a SQL argument must be a single literal statement with positional placeholders, and nullability is decided conservatively.** · locked
+
+[D033](#d033) says the compiler builds the schema by replaying migrations, prepares each statement, and reads its column metadata. What is decided here is everything that leaves unspecified.
+
+- **Source of the schema:** `migrations/NNN_name.sql` in numeric order if the directory exists, otherwise `schema.sql` beside the file being checked ([D041](#d041)), otherwise none — and none is an error at the first `db` call rather than at startup. Numbers need not be contiguous, because gaps are what abandoned branches leave, but they must be unique, because the order is the whole contract. A failing migration reports SQLite's own message at a span computed from `sqlite3_error_offset()`, so it points at the byte that broke.
+- **The replay records which migration created each table**, which is what lets a later diagnostic attach the "table `users` declared here" label the documented example in [06-tooling.md](06-tooling.md#diagnostics) shows. `doot check` never opens the project's real database; applying migrations is `doot migrate`.
+- **A SQL argument must be a literal** — a raw string, or a plain string with no interpolation — and must contain **exactly one statement**. A computed argument cannot be prepared, so accepting one would silently exempt it from every check in this section, and it is also the only way an injection could be written. Two statements in one literal would silently run the first only.
+- **Only positional `?` placeholders.** Arguments are passed positionally and a named placeholder has no name to bind from.
+- **An enum binds as text, not as its ordinal.** A text column is readable in the database and, decisively, reordering an enum's variants is a source refactor that must not change what stored rows mean. The ordinal is a runtime representation ([D002](#d002)), not a storage format.
+- **Result columns map to fields by name, order-independently**, in both directions, so `select *` needs no special case: the prepared statement's column list is already expanded.
+- **Nullability errs toward nullable.** A column is non-nullable only when `sqlite3_column_origin_name` identifies a `NOT NULL` base-table column *and* the statement contains no outer join, tested lexically. Being wrong toward nullable asks for a `T?` that was not strictly needed; being wrong toward non-null lets a NULL reach a slot that cannot hold one, which is the failure the check exists to prevent. Doing better means owning a SQL parser, which [D035](#d035) argues against for larger reasons.
+- **`db.batch(sql, rows)` binds a row struct's fields to placeholders in declaration order.** It is the minimal rule that makes `db.batch` checkable without tuples, which the language does not have.
+
+*Consequence:* two SQLite prepare failures get codes of their own, because both admit a suggestion: "no such table", listing the tables that exist, and "no such column", with the column's span, the nearest name by edit distance as a machine-applicable fix, and a related label at the migration that created the table. The second is allocated `DT0142` — the number [D038](#d038), [06-tooling.md](06-tooling.md#diagnostics), and [09-engineering.md](09-engineering.md#2-spec-tests--testsspec) have used as their running example since the first commit, down to the message and the suggestion. Allocating it to the diagnostic it was always illustrating turns three documents' example into a specification at no cost.
+
+*Consequence:* the schema checker requires `SQLITE_ENABLE_COLUMN_METADATA`, which is a compile-time define rather than a source edit and therefore satisfies [D052](#d052) without qualification.
+
+### D099
+**Route matching precedence is literal, then parameter, then wildcard, per segment — which makes shadowing unrepresentable, so rule 7 is duplication only.** · locked
+
+[03-grammar.md](03-grammar.md#well-formedness-rules) rule 7 forbids patterns that "conflict or shadow each other", and the second half turns out not to be a check.
+
+At each segment position, a literal beats a parameter and a parameter beats the wildcard. That is already the behaviour of the compile-time trie [05-runtime.md](05-runtime.md#request-lifecycle) specifies; stating it as a language rule means `/users/new` and `/users/:id` are both reachable, and so are `/files/:name` and `/files/*rest`. **No program exists in which one route hides another** — shadowing is unrepresentable, in the same way [D008](#d008) makes data races unrepresentable rather than merely unlikely.
+
+What remains is genuine ambiguity, and it has one form: two routes with the same method whose patterns are identical up to parameter renaming. `GET /users/:id` and `GET /users/:slug` are the same matcher and the trie cannot choose. That is rule 7's diagnostic, reported at the later declaration with a related label at the earlier.
+
+The check is a pairwise comparison over the finished, group-flattened table — quadratic in the number of routes, on a table bounded by the target use case, and exact. Detecting conflicts during trie insertion would be cheaper and would make the answer depend on the order files were walked in, which is not something a diagnostic may depend on.
+
+*Consequence:* a path parameter's type is restricted to `int`, `float`, and `str`. A URL segment is text, a failed conversion is a 404 rather than a fault ([02-syntax.md](02-syntax.md#routes)), and any other type would need a conversion policy that a `str` parameter and one line in the body expresses more clearly.
+
+### D100
+**The six semantic diagnostic ranges are allocated in full and in advance; a range is a subject rather than a stage; and four reserved rule numbers move to the start of their sub-range.** · locked
+
+This is [D064](#d064) applied to `DT0100`–`DT0699`. Codes are permanent once assigned ([D050](#d050)), so numbering is a one-way decision worth making deliberately, and allocating up front means a code is chosen by where it belongs rather than by what was free that week — which matters more here than for the front end, because [D102](#d102) has several workstreams running at once. The full sub-allocation is in [12-semantics.md](12-semantics.md#semantic-diagnostics).
+
+Two conflicts had to be resolved to write it.
+
+**A range is a subject, not a pipeline stage.** [05-runtime.md](05-runtime.md#compiler-pipeline) makes the schema checker its own stage while [06-tooling.md](06-tooling.md#code-ranges) puts its codes in a range labelled "names, modules, resolution, SQL/schema". That is not an inconsistency: the four subjects in that label are one subject, because a scope, a module namespace, and a database schema are all things outside the expression that a name must be resolved against, and a misspelled column is the same kind of mistake as a misspelled module member. The stage boundary answers *who checks this* and the range boundary answers *what is this about*, and they are allowed to disagree — the clean case being the "cannot be bound as a SQL parameter" code, which the typechecker reports because only it knows the argument's type, and which lives in the SQL block because it is about SQL.
+
+**A reserved rule code sits at the start of its sub-range.** [03-grammar.md](03-grammar.md#well-formedness-rules) reserved `DT0100` for rule 13 and `DT0101` for rule 14, taking the first two numbers of a hundred-code range and leaving the naming rules [D069](#d069) assigns to that range with no clean start; `DT0402` and `DT0403` did the same one range up, dropping two exhaustiveness-and-divergence codes into an otherwise contiguous block about `!` and `else`. So four numbers move: rule 13 to `DT0140`, rule 14 to `DT0130`, rule 8 to `DT0420`, rule 16 to `DT0440`. Rules 2, 3, 4, 5, 6, 7, and 15 keep theirs, each already sitting at or immediately after its sub-range's start.
+
+The move is legitimate and cheap for one specific reason: [D065](#d065) separates **reservation**, which lives in the documentation, from **registration**, which lives in `diag_codes.h`, and only a registered code is frozen by [D050](#d050). None of the four is registered, so the cost is one edit to the rule-to-code table in [03-grammar.md](03-grammar.md#well-formedness-rules) and nothing else — and this is the last moment it is available, because the instant any of them is registered it is permanent.
+
+*Rejected:* carving the sub-ranges around the two numbers where they sat, which protects numbers nothing depends on and makes every subsequent choice worse; *also rejected:* giving the schema checker a new top-level range at `DT0700`, which would contradict the "subject, not stage" reading above and would require editing the range table in [06-tooling.md](06-tooling.md#code-ranges) to say something less true than what it already says.
+
+*Consequence:* the range table in [06-tooling.md](06-tooling.md#code-ranges) is unchanged. Both sub-allocations — the front end's and this one — live in the documents that own their stages, which is where [D064](#d064) put the first one.
+
+### D101
+**`doot check` takes at most one path, and a command's `--json` output is the diagnostic schema plus at most one top-level key named after the command.** · locked
+
+`doot check [--json] [path]`, where the path is a directory (that project), a file (single-file mode, with `schema.sql` beside it), or absent (the working directory). **Two or more paths is a usage error**, because compilation is whole-program and a list of paths does not describe a program. `doot fmt` accepts many paths because formatting is per-file; checking is not, and quietly checking each path as its own program would be a different command wearing the same name.
+
+Exit codes are the three in [06-tooling.md](06-tooling.md#exit-codes), with one worth stating because it is easy to get wrong: a **warning-only** run exits `1`, since `1` means "reported diagnostics", and the spec runner asserts exactly that split. The human summary is pinned exactly by `expect-output` ([D075](#d075)).
+
+The second half concerns `doot routes`, which needs to emit a route table and cannot do it inside a schema that carries only diagnostics. The rule: a command's `--json` output is the diagnostic schema plus **at most one** top-level key, named after the command. `doot routes` adds `routes`; `doot check` adds nothing.
+
+The spec runner rejects unknown JSON keys by design ([D071](#d071)), so its reader learns `routes` in the same change that adds the command — visibly, in a diff. That is not a cost being absorbed, it is the mechanism [D071](#d071) chose: schema growth is meant to be a deliberate, breaking, reviewed edit rather than something a tolerant reader absorbs silently.
+
+*Rejected:* a separate `doot routes --format=json` or a sidecar file, both of which add surface to avoid a one-key schema extension; *also rejected:* nesting the route table inside `summary`, which would overload a field whose meaning is pinned.
+
+### D102
+**Two milestones: the resolver, the route checker, and `doot routes` first; then the typechecker, the schema checker, and `doot check`.** · locked
+
+The order is forced rather than preferred, by two decisions acting together. [D054](#d054) says a command ships only when it fully works. [D065](#d065) and the `docs` gate say a diagnostic code is registered only alongside the spec test that produces it — and a spec test drives a command. So **a stage cannot land before a command that reaches its diagnostics**, and the milestones are the groupings for which such a command exists.
+
+`doot routes` is what makes a first milestone possible, and it is [D067](#d067)'s insight in a second place. It needs the parser, the resolver, and the route checker and nothing else, so it is **complete rather than partial** at that point — exactly as `doot fmt` was complete at the parser milestone. That milestone therefore lands the symbol table, the module table, the type representation, name resolution, naming, mutability, the route table, and rules 2, 5, 6, 7, and 14, with spec tests in `routes` mode.
+
+The second milestone lands the typechecker, the schema checker, `doot check`, and rules 3, 4, 8, 13, and 16. It is the largest single landing in the project — roughly eighty codes and their tests, against the first milestone's fifty — and the size is a consequence rather than a choice: `doot check` is the only command that reaches the typechecker, and it cannot ship without the schema checker, because a `doot check` that silently ignored a SQL literal is the half-working command [D054](#d054) exists to prevent, on the one promise ([D033](#d033)) that is hardest to make credible. What keeps it reviewable is five complete internal steps as five commits on one branch, with the command added last.
+
+Three workstreams run concurrently inside it: the **schema checker**, which needs only the first milestone's symbol table and declared types and is independent of the typechecker except for one code the typechecker reports anyway; **markup value typing**, which needs only the type representation; and the **module signature table**, which is data rather than logic, is 26 modules for v0.1, and is on the critical path for everything because no checker can be tested against a program calling a module the table does not describe.
+
+The chokepoints that serialize work regardless of how the stages are divided are named in [12-semantics.md](12-semantics.md#the-shared-chokepoints): `LAYERS` in the Makefile, the `units` list in `tools/amalgamate.sh`, `src/base/diag_codes.h`, the range table in [06-tooling.md](06-tooling.md#code-ranges), the dispatch chain in `src/cli/main.c`, and the suite array in `tests/unit/main.c`. The sub-allocation in [D100](#d100) is what makes the third of those conflict-free in content; the rest are one or two edits each, placed deliberately at the start of a milestone.
+
+*Consequence:* the vendored SQLite enters the build in the second milestone, which is where `tools/vendor.sh` installs its tree for the first time and the `unity` gate's command grows a second translation unit: `cc -O2 -o doot build/doot.c vendor/sqlite/sqlite3.c`. That does not weaken [D045](#d045) — the amalgamation is one file of *doot*, and SQLite's amalgamation is already one file of SQLite — and it cannot be folded in, because vendored code keeps its own warning flags ([D052](#d052)).
+
+*Consequence:* rule 15 is the one pending well-formedness rule with no spec tests in v0.1. `spawn` is `DT0046` until v0.2, and [D081](#d081)'s barrier means the resolver never runs on a program containing one, so its code is unreachable and therefore correctly unregistered until tasks land. A dated gap, recorded, rather than a forgotten one.
