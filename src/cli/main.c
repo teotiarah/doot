@@ -74,12 +74,16 @@ static int cmd_explain(int argc, char **argv) {
 
 /* ---- fmt ---------------------------------------------------------------- */
 
+/* Every file this walks ends in exactly one of three states, and they are
+ * counted separately because collapsing them is a lie: a file that could not be
+ * formatted is not a file that needed no formatting. */
 typedef struct {
   arena *a;
   diag_sink sink;
   bool json;
-  unsigned long checked;
-  unsigned long changed;
+  unsigned long changed; /* rewritten in place */
+  unsigned long clean;   /* parsed, and already byte-for-byte canonical */
+  unsigned long skipped; /* left alone: it did not parse, or the write failed */
   buf changed_list;
 } fmt_run;
 
@@ -95,24 +99,34 @@ static void fmt_file(fmt_run *r, slice path) {
 
   src = source_from_file(r->a, path, &r->sink);
   if (src == NULL) {
-    return; /* counted only once it is known to be a file we could read */
+    /* Counted in no bucket: DT1001 is already reported, and a path that could
+     * not be read is not a source file whose formatting we have an opinion on. */
+    return;
   }
-  r->checked++;
 
   unit = parse_unit(r->a, src, &r->sink);
   if (diag_error_count(&r->sink) != errors_before) {
     /* A file that did not parse is left alone. The tree has holes where the
      * parser recovered, so printing it would produce plausible source that
      * silently differs from what the author wrote -- much worse than not
-     * formatting it. */
+     * formatting it.
+     *
+     * It counts as skipped rather than clean. Reporting it as already formatted
+     * would assert the one thing this branch does not know, and the assertion
+     * would be wrong precisely when the file is worst. */
+    r->skipped++;
     return;
   }
 
   formatted = fmt_unit(r->a, unit);
   if (slice_eq(formatted, source_text(src))) {
+    r->clean++;
     return;
   }
   if (!fs_write_file(r->a, path, formatted, &r->sink)) {
+    /* DT1002. The write is a temporary plus a rename, so the file still holds
+     * exactly what the author wrote -- unformatted, hence skipped. */
+    r->skipped++;
     return;
   }
   r->changed++;
@@ -189,14 +203,26 @@ static int cmd_fmt(int argc, char **argv) {
     diag_render_json(&r.sink, &out);
     (void)fputs(buf_cstr(&out), stdout);
   } else {
+    /* The denominator is the files that were actually formatted, not every file
+     * seen: the skipped ones are accounted for on their own line, and folding
+     * them in here would imply they had been found canonical. */
+    unsigned long formatted = r.changed + r.clean;
+
     diag_render_human(&r.sink, &out, false);
     (void)fputs(buf_cstr(&out), stderr);
     if (r.changed > 0u) {
-      (void)printf("reformatted %lu of %lu file%s\n", r.changed, r.checked,
-                   r.checked == 1u ? "" : "s");
+      (void)printf("reformatted %lu of %lu file%s\n", r.changed, formatted,
+                   formatted == 1u ? "" : "s");
       (void)fputs(buf_cstr(&r.changed_list), stdout);
-    } else {
-      (void)printf("%lu file%s already formatted\n", r.checked, r.checked == 1u ? "" : "s");
+    } else if (r.clean > 0u || r.skipped == 0u) {
+      /* The `r.skipped == 0u` arm is what keeps a walk that formatted nothing at
+       * all from being silent -- including an empty directory, which reports
+       * zero. When every file was skipped, the skipped line below says so on its
+       * own and a `0 files already formatted` above it would only add noise. */
+      (void)printf("%lu file%s already formatted\n", r.clean, r.clean == 1u ? "" : "s");
+    }
+    if (r.skipped > 0u) {
+      (void)printf("skipped %lu file%s with errors\n", r.skipped, r.skipped == 1u ? "" : "s");
     }
   }
 

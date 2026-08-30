@@ -412,40 +412,62 @@ static void a_block_comment_survives(unit *t) {
 /* ---- the documented application ---------------------------------------- */
 
 static void the_chat_application_is_already_canonical(unit *t) {
-  /* The program from docs/02-syntax.md, minus its stream handler. Formatting the
-   * documentation's own example must be a no-op, or the documentation is wrong. */
-  static const char *src = "type Msg {\n"
-                           "  id:   int\n"
-                           "  room: str\n"
-                           "  body: str\n"
-                           "  at:   time.Time\n"
-                           "}\n"
-                           "\n"
-                           "fn layout(title: str, body: html) -> html {\n"
-                           "  return <html>\n"
-                           "    <head><title>${title}</title></head>\n"
-                           "    <body>${body}</body>\n"
-                           "  </html>\n"
-                           "}\n"
-                           "\n"
-                           "route GET \"/rooms/:room\" (room: str) -> html! {\n"
-                           "  let msgs = db.all[Msg](\n"
-                           "    \"select * from msgs where room = ? order by id desc limit 50\",\n"
-                           "    room,\n"
-                           "  )!\n"
-                           "\n"
-                           "  return layout(room, <div>\n"
-                           "    <ul id=\"feed\" data-live=\"/rooms/${room}/live\">\n"
-                           "      {for m in msgs}\n"
-                           "        <li>${m.body}</li>\n"
-                           "      {end}\n"
-                           "    </ul>\n"
-                           "    <form method=\"post\" action=\"/rooms/${room}\">\n"
-                           "      <input name=\"body\" required/>\n"
-                           "      <button>send</button>\n"
-                           "    </form>\n"
-                           "  </div>)\n"
-                           "}\n";
+  /* The program from docs/02-syntax.md in full, minus only its stream handler,
+   * which is DT0046-gated until v0.2 and so cannot reach the printer. Formatting
+   * the documentation's own example must be a no-op, or the documentation is
+   * wrong -- and it was: both db call sites were written with their arguments
+   * packed onto one line, which D068 normalizes to one argument per line with a
+   * trailing comma. This case only says which of the two is wrong if it carries
+   * the whole program, so every declaration in the doc is reproduced here. */
+  static const char *src =
+      "type Msg {\n"
+      "  id:   int\n"
+      "  room: str\n"
+      "  body: str\n"
+      "  at:   time.Time\n"
+      "}\n"
+      "\n"
+      "fn layout(title: str, body: html) -> html {\n"
+      "  return <html>\n"
+      "    <head><title>${title}</title></head>\n"
+      "    <body>${body}</body>\n"
+      "  </html>\n"
+      "}\n"
+      "\n"
+      "route GET \"/rooms/:room\" (room: str) -> html! {\n"
+      "  let msgs = db.all[Msg](\n"
+      "    \"select * from msgs where room = ? order by id desc limit 50\",\n"
+      "    room,\n"
+      "  )!\n"
+      "\n"
+      "  return layout(room, <div>\n"
+      "    <ul id=\"feed\" data-live=\"/rooms/${room}/live\">\n"
+      "      {for m in msgs}\n"
+      "        <li>${m.body}</li>\n"
+      "      {end}\n"
+      "    </ul>\n"
+      "    <form method=\"post\" action=\"/rooms/${room}\">\n"
+      "      <input name=\"body\" required/>\n"
+      "      <button>send</button>\n"
+      "    </form>\n"
+      "  </div>)\n"
+      "}\n"
+      "\n"
+      "type NewMsg {\n"
+      "  body: str @len(1, 500) @trim\n"
+      "}\n"
+      "\n"
+      "route POST \"/rooms/:room\" (room: str, form: NewMsg) -> redirect! {\n"
+      "  let m = db.one[Msg](\n"
+      "    \"insert into msgs (room, body, at) values (?, ?, ?) returning *\",\n"
+      "    room,\n"
+      "    form.body,\n"
+      "    time.now(),\n"
+      "  )!\n"
+      "\n"
+      "  topic.publish(\"room:\" + room, m)\n"
+      "  return http.see_other(\"/rooms/\" + room)\n"
+      "}\n";
 
   expect_fmt(t, src, src);
 }
