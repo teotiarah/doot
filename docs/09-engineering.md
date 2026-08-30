@@ -229,7 +229,7 @@ Every `.c` has a matching `.h` declaring exactly its public surface; everything 
 ```
 Makefile  .clang-format  .clang-tidy  .github/workflows/ci.yml
 src/
-  base/               plat, assert, arena, slice, buf, source, diag
+  base/               plat, assert, arena, slice, buf, source, diag, fs
   cli/                command dispatch
   lex/                token, lexer                   (10-frontend.md)
   parse/              AST, parser, printer           (10-frontend.md)

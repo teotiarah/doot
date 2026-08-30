@@ -379,7 +379,24 @@ static void a_follow_token_suppresses_the_newline(unit *t) {
   EXPECT_KINDS(t, "f(a\n)", TOK_IDENT, TOK_LPAREN, TOK_IDENT, TOK_RPAREN, TOK_EOF);
   EXPECT_KINDS(t, "[a\n]", TOK_LBRACKET, TOK_IDENT, TOK_RBRACKET, TOK_EOF);
   EXPECT_KINDS(t, "{a\n}", TOK_LBRACE, TOK_IDENT, TOK_RBRACE, TOK_EOF);
-  EXPECT_KINDS(t, "}\nelse {", TOK_RBRACE, TOK_KW_ELSE, TOK_LBRACE, TOK_EOF);
+}
+
+static void a_follow_token_cannot_begin_a_construct(unit *t) {
+  /* The rule that settles membership of the follow set. Suppressing the newline
+   * before a token costs the parser the ability to tell "continues the previous
+   * line" from "starts a new one", so only a token that can never begin anything
+   * may be in it. `.` and `else` can, and both were in it originally: `.` begins a
+   * match pattern, `else` begins a match arm. */
+  EXPECT_KINDS(t, "f()\nelse", TOK_IDENT, TOK_LPAREN, TOK_RPAREN, TOK_NEWLINE, TOK_KW_ELSE,
+               TOK_EOF);
+  /* On one line, which is doot style, there is no newline to suppress anyway. */
+  EXPECT_KINDS(t, "} else {", TOK_RBRACE, TOK_KW_ELSE, TOK_LBRACE, TOK_EOF);
+}
+
+static void a_match_arms_else_keeps_its_own_line(unit *t) {
+  EXPECT_KINDS(t, "match a {\n  1 -> two()\n  else -> other()\n}", TOK_KW_MATCH, TOK_IDENT,
+               TOK_LBRACE, TOK_INT, TOK_ARROW, TOK_IDENT, TOK_LPAREN, TOK_RPAREN, TOK_NEWLINE,
+               TOK_KW_ELSE, TOK_ARROW, TOK_IDENT, TOK_LPAREN, TOK_RPAREN, TOK_RBRACE, TOK_EOF);
 }
 
 static void a_dot_continues_a_line_but_does_not_follow_one(unit *t) {
@@ -822,6 +839,8 @@ static const unit_case cases[] = {
     {"a_dot_continues_a_line_but_does_not_follow_one",
      a_dot_continues_a_line_but_does_not_follow_one},
     {"a_match_arm_pattern_keeps_its_own_line", a_match_arm_pattern_keeps_its_own_line},
+    {"a_follow_token_cannot_begin_a_construct", a_follow_token_cannot_begin_a_construct},
+    {"a_match_arms_else_keeps_its_own_line", a_match_arms_else_keeps_its_own_line},
     {"comments_are_not_significant_for_line_structure",
      comments_are_not_significant_for_line_structure},
     {"the_newline_span_covers_the_whole_run", the_newline_span_covers_the_whole_run},

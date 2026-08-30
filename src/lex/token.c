@@ -192,27 +192,45 @@ static unsigned token_flags(token_kind kind) {
 
   /* Follow only. A closing bracket permits a break *before* it, so a multi-line
    * call or literal works -- but it must not suppress the newline *after* it, or
-   * `f()` would swallow its own statement terminator and join the next line. */
-  case TOK_KW_ELSE:
+   * `f()` would swallow its own statement terminator and join the next line.
+   *
+   * The rule that decides membership here, learned the hard way twice:
+   *
+   *   A follow token must not be able to *begin* a construct.
+   *
+   * Suppressing the newline before a token means the parser can no longer tell
+   * "this token continues the previous line" from "this token starts a new one".
+   * For `)`, `]`, and `}` that distinction does not exist -- none of them can begin
+   * anything -- so suppression is safe. `.` and `else` both can, and both were in
+   * this set originally; see the two cases below. */
   case TOK_RPAREN:
   case TOK_RBRACKET:
   case TOK_RBRACE:
     return TF_FOLLOW;
 
   /* `.` continues a line but does not follow one, so a method chain breaks *after*
-   * the dot rather than before it.
-   *
-   * Leading-dot continuation had to go, because a `match` arm's pattern begins with
-   * a dot and there is no way to tell the two apart once the newline is gone:
+   * the dot rather than before it. A `match` arm's pattern begins with a dot:
    *
    *     match status {
    *       .active -> render()
    *       .banned -> deny()      <- joins to `render().banned` if `.` follows
    *     }
    *
-   * Required syntax wins over optional style: an enum pattern cannot be written any
-   * other way, while a chain can break after the dot or inside the parentheses. */
+   * `else` is the same problem one level up: it begins a match arm, so with the
+   * newline suppressed the previous arm's value swallowed it as an `else`
+   * coalesce and then found `->` where it wanted an expression:
+   *
+   *     match a {
+   *       1 | 2 -> two()
+   *       else -> other()        <- parsed as `two() else -> other()`
+   *     }
+   *
+   * `else` needed suppression only for an `else` written on its own line after a
+   * `}`, which is not doot style and appears in no example -- and the parser
+   * accepts that form anyway by looking past a newline, with `doot fmt`
+   * normalizing it to `} else {`. Required syntax wins over optional style. */
   case TOK_DOT:
+  case TOK_KW_ELSE:
     return TF_CONTINUATION;
 
   /* Neither. */

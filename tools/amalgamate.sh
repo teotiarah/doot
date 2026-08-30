@@ -24,11 +24,13 @@ src/base/arena.c
 src/base/slice.c
 src/base/buf.c
 src/base/source.c
+src/base/fs.c
 src/base/diag.c
 src/lex/token.c
 src/lex/lex.c
 src/parse/ast.c
 src/parse/parse.c
+src/parse/print.c
 src/cli/main.c
 "
 

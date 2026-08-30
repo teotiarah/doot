@@ -593,6 +593,22 @@ The second half is not cosmetic. `>` is in the statement-continuation set as a c
   ```
 
   The newline before `.banned` was suppressed, producing `render().banned` and silently merging two arms into one expression. That is the documented `match` example in [02-syntax.md](02-syntax.md#control-flow), so the rule as written could not parse the language's own reference. An enum pattern has no other spelling, while a chain can break after the dot or inside the parentheses — required syntax wins over optional style. *Found while implementing the parser against this rule.*
+- **`else` is removed from the follow set** as well, and for the same reason one level up: it begins a match arm, so the previous arm's value swallowed it as an `else` coalesce and then found `->` where an expression should be:
+
+  ```do
+  match a {
+    1 | 2 -> two()
+    else -> other()     // parsed as `two() else -> other()`
+  }
+  ```
+
+  `else` needed suppression only for an `else` written on its own line after a `}`, which is not doot style and appears in no example — and the parser accepts that form regardless by looking past the newline, with `doot fmt` normalizing it to `} else {`. *Found while implementing the printer against the documented examples.*
+
+**The rule that settles membership, arrived at after correcting two of the five entries:**
+
+> A follow token must not be able to begin a construct.
+
+Suppressing the newline *before* a token costs the parser the ability to distinguish "this token continues the previous line" from "this token starts a new one". For `)`, `]`, and `}` that distinction does not exist, because none of them can begin anything — so suppression is safe and is what makes multi-line calls, lists, and blocks work. `.` begins a match pattern and `else` begins a match arm, so both were unsafe. Stating the rule is worth more than the two fixes: it is checkable against any future addition, and it is why the remaining three entries can be trusted.
 
 Separately, `}` in the *follow* set means the final statement in a block has no `NEWLINE` after it, so `expr NEWLINE` cannot match it. **Statement end** is therefore defined as `NEWLINE` consumed, or a lookahead of `}` or end of input not consumed, everywhere the grammar writes `NEWLINE` in a statement production.
 
@@ -673,3 +689,30 @@ A spec test drives a real command; the directives assume `doot check`; and `doot
 *Consequence:* comments are never discarded, because a canonical formatter that deletes comments is not a formatter. The lexer appends each one to an optional caller-supplied list, and `comments == NULL` discards them exactly as `sink == NULL` scans silently.
 
 *This consequence originally said comments are tokens, and that is wrong.* The line-structure rule needs the next significant token across a run of newlines, an unbounded number of comments can sit inside that run, and every token scanned past has to be held for delivery — so inline emission requires a lookahead queue as long as the comment run, which means allocation on the scanning path and contradicts [D057](#d057). A side list costs the same allocation only when a caller wants comments, and loses nothing: they arrive in source order with exact spans, which is all a printer needs. Found while implementing the algorithm against the written rule, which is the point of writing it down first.
+
+
+### D068
+**`doot fmt` normalizes everything except line structure inside markup literals and argument lists, which it preserves.** · locked
+
+Canonical, as [D039](#d039) requires: indentation, spacing, blank lines capped at one, struct fields aligned on the colon, void elements normalized to `<br/>`, parentheses re-derived from precedence, one spelling per numeric value. What the printer does *not* do is decide where a line breaks inside a markup literal or an argument list.
+
+Two independent reasons, either of which is sufficient.
+
+**The printer has no wrapping rule, so it must not join.** [06-tooling.md](06-tooling.md#doot-fmt) specifies a wrap column for markup attributes and for nothing else. A formatter that cannot break a long line must not merge one either, or a line the author split deliberately becomes unsplittable — the formatter would fight the only tool the author has left. So `f(\n  a,\n  b\n)` stays broken and `f(a, b)` stays joined, and the multi-line form is normalized to one argument per line with a trailing comma.
+
+**In markup, a line break is content.** Whitespace between elements collapses to a single space in inline context, so *changing the amount* of indentation is invisible to the rendered page while *adding or removing a break* is not. Deciding breaks correctly needs an inline-versus-block element table and an understanding of CSS `white-space` — a large surface, and being wrong in it silently changes what a user's page looks like rather than producing an error. `pre` and `textarea` are emitted verbatim for the same reason, one step further.
+
+*Consequence:* a text run that already spans lines is re-indented line by line, which is safe under the same collapsing argument and is what allows nested markup to be indented at all. A text run with no newline is emitted byte for byte, because a single space between two inline elements is meaningful.
+
+*Rejected:* full re-layout of markup, as Prettier does for HTML — it needs the element and CSS model above, and its failure mode is a page that renders differently, which is exactly the class of silent behavior change this project refuses elsewhere. *Also rejected:* preserving nothing and emitting every construct on one line — simple, canonical, and it makes long lines unbreakable.
+
+### D069
+**Naming rules are enforced by the checker, not by the formatter.** · locked
+
+*This corrects [06-tooling.md](06-tooling.md#doot-fmt), which said naming "is part of the format".*
+
+A formatter cannot rename. Renaming changes what the code means and requires rewriting every use site, which is refactoring; formatting rewrites only how the same meaning is spelled. `doot fmt` therefore reports nothing about names.
+
+The rules are unchanged and still enforced rather than suggested — modules `lower`, types `PascalCase`, functions and fields `snake_case`, enum variants `snake_case` — but they are the checker's, alongside the rest of name resolution, and their codes are allocated in the `DT0100`–`DT0199` names range in the semantic pass rather than here.
+
+*Consequence:* the diagnostic carries the correct spelling as a machine-applicable suggestion ([D038](#d038)), so an agent or an editor can apply the rename even though `doot fmt` will not.

@@ -885,6 +885,14 @@ void lex_open_markup(lexer *lx, span at) {
   (void)push_frame(lx, LEX_MARKUP_TAG, at.start, TOK_EOF);
 }
 
+void lex_close_element(lexer *lx) {
+  DOOT_ASSERT(lx != NULL);
+  /* Only pop a markup level; a stray call must not unwind an interpolation. */
+  if (lx->sp > 0u && (top(lx)->mode == LEX_MARKUP_CONTENT || top(lx)->mode == LEX_MARKUP_TAG)) {
+    pop_frame(lx);
+  }
+}
+
 slice lex_text(const lexer *lx, token t) {
   DOOT_ASSERT(lx != NULL);
   if (span_is_none(t.at) || t.at.start > lx->n) {
