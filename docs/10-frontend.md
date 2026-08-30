@@ -1,6 +1,6 @@
 # Front end
 
-Implementation specification for the lexer, the parser, the AST, the front-end diagnostics, and the specification-test runner. Decisions are recorded as [D056](01-decisions.md#d056)–[D067](01-decisions.md#d067).
+Implementation specification for the lexer, the parser, the AST, the front-end diagnostics, and the printer. Decisions are recorded as [D056](01-decisions.md#d056)–[D069](01-decisions.md#d069). The specification-test suite that exercises all of it is [11-spec-tests.md](11-spec-tests.md).
 
 This document covers the first three stages of the pipeline in [05-runtime.md](05-runtime.md#compiler-pipeline) and stops there. The resolver, the typechecker, the schema checker, the register allocator, and the emitter are specified in a later pass, as are the opcode table, the native-call ABI, the frame-map encoding, and the runtime value layout. Nothing here depends on those, which is the point: the front end is the part of the compiler that can be settled and finished while the back end is still open.
 
@@ -373,7 +373,7 @@ Earlier is better here: the parser has the tightest span, it already tracks the 
 
 The allocation above is a **reservation, not a registration** ([D065](01-decisions.md#d065)).
 
-`src/base/diag_codes.h` gains a row only in the same change that adds the code's implementation and the test that produces it. This is forced, and it is right: `tools/check-docs.sh` fails when a code in the registry is not produced by any test under `tests/`, which is [D049](01-decisions.md#d049) made mechanical. Pre-populating the registry with forty rows would break the `docs` gate immediately, and it would also be a stub table — forty codes that `doot explain` describes and the compiler never emits ([D054](01-decisions.md#d054)).
+`src/base/diag_codes.h` gains a row only in the same change that adds the code's implementation and the test that produces it. This is forced, and it is right: `tools/check-docs.sh` fails when a code in the registry is not produced by a **spec** test, which is [D049](01-decisions.md#d049) made mechanical — with an explicit four-code allowlist for the ones that describe the driver's environment rather than source text and so cannot be reached from a `.do` file at all ([D079](01-decisions.md#d079)). Pre-populating the registry with forty rows would break the `docs` gate immediately, and it would also be a stub table — forty codes that `doot explain` describes and the compiler never emits ([D054](01-decisions.md#d054)).
 
 So the number is decided here, in the document, and the row is written later, with the code that emits it. The reservation is what keeps two workstreams from both taking `DT0031`; the gate is what keeps the registry honest.
 
@@ -381,25 +381,9 @@ So the number is decided here, in the document, and the row is written later, wi
 
 ## Specification tests
 
-`tests/spec/` is the primary suite ([D049](01-decisions.md#d049)) — a `.do` file, its expectations in leading comments, and a runner that drives the real binary. The directive set is specified in [09-engineering.md](09-engineering.md#2-spec-tests--testsspec).
+`tests/spec/` is the primary suite ([D049](01-decisions.md#d049)) and it is **specified in [11-spec-tests.md](11-spec-tests.md)** — the directive grammar, the matching rules, the runner's interface, the layout, and the gates.
 
-### The runner
-
-A C program at `tests/spec/spec_runner.c`, built by the Makefile as `build/<profile>/doot_spec`, alongside `doot_test` ([D066](01-decisions.md#d066)). It is a test binary, not a `doot` subcommand, and it is outside the amalgamation — `tools/amalgamate.sh` only scans `src/`, so nothing there changes.
-
-It discovers `tests/spec/**/*.do`, reads the directives, invokes the real `doot` binary once per file, and compares structured output **exactly**: code, line, column, and message for each expected diagnostic, and span plus replacement text for each expected suggestion. A diagnostic that appears but was not expected fails the file, and so does an expected one that does not appear. That symmetry is the point — a substring match on stderr would let a reworded message pass silently, and the suite exists to make exactly that a visible diff.
-
-Output matches the unit harness: one line per directory, detail on failure only.
-
-Two implementation choices worth recording, because both look like the wrong call until the reason is stated:
-
-**The subprocess runs through ISO C `system()` with output redirected to a temporary file**, not `popen`. `popen` is POSIX, absent from C99, and spelled `_popen` on MSVC — so using it would put a platform shim in the test tooling before v0.5 needs one anywhere else. `system()` is standard C, needs no shim, and the runner's cost is dominated by process startup regardless.
-
-**The runner contains its own narrow JSON reader**, roughly 150 lines, that understands exactly the schema pinned in [06-tooling.md](06-tooling.md#diagnostics) and rejects anything else. It does **not** use the `json` stdlib module, then or ever. A test tool that parses its input with the implementation under test cannot fail independently of it: a bug in `json` would make the suite report success. Keeping the reader separate costs a small amount of duplicated effort and buys a suite whose verdict means something.
-
-### What the runner drives, and when
-
-The four modes — `check`, `run`, `fmt`, `routes` — are supported from the first commit, since they differ only in argv. Which modes have **files** depends on which commands exist, and no command is invoked before it fully works ([D054](01-decisions.md#d054)). At the front-end stage that is `fmt`; `check` files appear when the typechecker lands.
+It has its own document because it outlives this one. Every later milestone adds files to it and adds no new mechanism, so the mechanism belongs somewhere that is not a front-end document. What matters here is only the part that constrains the front end: **the suite drives `doot fmt`**, because that is the first command that is complete rather than partial, and every lexical and syntactic diagnostic is therefore reachable and spec-testable at the parser milestone rather than waiting for the typechecker ([D067](01-decisions.md#d067)).
 
 ---
 

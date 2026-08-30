@@ -114,7 +114,7 @@ The suite arrives with **`doot fmt`**, at the parser milestone — not with the 
 ```do
 // doot-spec: check
 // expect-error: DT0142 at 3:36 "column `emial` does not exist on table `users`"
-// expect-suggestion: 3:36 -> "email"
+// expect-suggestion: 3:36-3:41 -> "email"
 
 route GET "/" () -> html! {
   let u = db.one[User]("select id, emial from users", 1)!
@@ -127,20 +127,22 @@ Directives, all of which the runner verifies exactly rather than by substring:
 | Directive | Asserts |
 | --- | --- |
 | `doot-spec: <mode>` | how to run it — `check`, `run`, `fmt`, `routes` |
-| `expect-ok` | compiles with no diagnostics |
-| `expect-error: <CODE> at <line>:<col> "<message>"` | that exact code, span, and message |
-| `expect-warning: …` | as above |
-| `expect-suggestion: <line>:<col> -> "<text>"` | a machine-applicable fix ([D038](01-decisions.md#d038)) |
-| `expect-output:` | stdout of `doot run`, as a following comment block |
+| `expect-ok` | no diagnostics at all |
+| `expect-error: <CODE> at <line>:<col> "<message>"` | that exact code, position, and message |
+| `expect-warning: …` | as above, at warning severity |
+| `expect-suggestion: <line>:<col>-<line>:<col> -> "<text>"` | a machine-applicable fix, span and replacement ([D038](01-decisions.md#d038)) |
+| `expect-output:` | the command's exact stdout, in the following lines |
 | `expect-fault: <CODE>` | a runtime fault of that kind |
-| `expect-fmt-stable` | `doot fmt` is idempotent on this file |
+| `expect-fmt-stable` | `doot fmt` leaves the file byte for byte unchanged |
 
 Two rules make this suite load-bearing rather than decorative:
 
-1. **A diagnostic code does not exist until a spec test produces it.** A code in the registry with no test is a CI failure. This is what keeps [D038](01-decisions.md#d038)'s promise of exact spans and applicable suggestions true as the compiler grows.
-2. **Every well-formedness rule in [03-grammar.md](03-grammar.md#well-formedness-rules) has at least one accepting and one rejecting test.** The grammar document and the suite are checked against each other.
+1. **A diagnostic code does not exist until a spec test produces it.** A code in the registry with no test is a CI failure. A code that describes source text is proved here; the four that describe the driver's own environment, and that no `.do` file can elicit, are proved by unit tests against an explicit allowlist ([D079](01-decisions.md#d079)). This is what keeps [D038](01-decisions.md#d038)'s promise of exact spans and applicable suggestions true as the compiler grows.
+2. **Every well-formedness rule in [03-grammar.md](03-grammar.md#well-formedness-rules) has an accepting and a rejecting test.** Enforced from the rule-to-code table in the grammar, so it is a gate rather than an intention ([D078](01-decisions.md#d078)).
 
-The runner compares full structured output — it consumes `doot check --json`, so a changed span or a reworded message is a visible diff rather than a silently passing substring match.
+The runner compares full structured output in both directions — an unexpected diagnostic fails a file just as a missing expected one does — so a changed span or a reworded message is a visible diff rather than a silently passing substring match.
+
+**The directive grammar, the matching rules, the runner's interface, and the suite's layout are specified in [11-spec-tests.md](11-spec-tests.md)**, along with the three gates that keep it honest. Two details are worth carrying here because they are easy to get wrong from this summary alone: a position is the **character** column that `--json` reports, not the display column under a caret in human output ([D073](01-decisions.md#d073)), and `expect-fmt-stable` formats a **copy** in a scratch directory, so the suite never writes to the repository ([D074](01-decisions.md#d074)).
 
 ### 3. Wire tests — `tests/wire/`
 
@@ -236,7 +238,8 @@ src/
   (sema, vm, http, db … as they land)
 tests/
   unit/               C unit tests + harness
-  spec/               .do specification tests        (with `doot fmt`)
+  spec/               .do specification tests        (11-spec-tests.md)
+    spec_runner.c     the runner, outside the amalgamation
   wire/               raw-socket HTTP tests          (with the server)
 fuzz/
   fuzz_source.c  corpus/  regressions/

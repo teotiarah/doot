@@ -716,3 +716,111 @@ A formatter cannot rename. Renaming changes what the code means and requires rew
 The rules are unchanged and still enforced rather than suggested — modules `lower`, types `PascalCase`, functions and fields `snake_case`, enum variants `snake_case` — but they are the checker's, alongside the rest of name resolution, and their codes are allocated in the `DT0100`–`DT0199` names range in the semantic pass rather than here.
 
 *Consequence:* the diagnostic carries the correct spelling as a machine-applicable suggestion ([D038](#d038)), so an agent or an editor can apply the rename even though `doot fmt` will not.
+
+
+---
+
+## Specification tests
+
+### D070
+**The spec runner reads its directives as plain text and links nothing from `src/`.** · locked
+
+The runner finds the leading `//` block by scanning bytes, not by calling `lex_new` and walking the comment list it already collects for `doot fmt`.
+
+Reusing the lexer is the obvious move and it is wrong twice. It is the argument from [D066](#d066) applied one level out: a test tool that reads its own expectations through the implementation under test cannot fail independently of it, and a lexer bug that dropped a comment or misplaced its span would make the suite mis-read what it was asked to assert — reporting success while the thing it guards is broken. It is also simply impossible in the general case, because a large share of these files exist precisely because they *fail* to lex, and their expectations still have to be readable.
+
+*Rejected:* a `--emit-directives` mode on the `doot` binary, which moves the same circularity behind a flag and adds CLI surface for the test suite's benefit; parsing directives from a sidecar `.json` or `.toml` file per test, which doubles the file count, separates a test from its expectations, and needs a parser for a second format nobody asked for.
+
+*Consequence:* the runner is a pure function of the bytes of the `.do` file and the bytes the subprocess wrote, which is what lets it be trusted to arbitrate between the compiler and the documentation.
+
+### D071
+**The runner fails closed: an unknown directive, an unknown JSON key, a missing mode, or a file that asserts nothing is a failure.** · locked
+
+A spec test that silently asserts nothing is worse than a missing test, because it reports as coverage. So every ambiguity resolves to failure: a directive name that is not in the table, a malformed argument, a `.do` file with no `doot-spec:` line, a file with a mode and no expectation, a JSON object carrying a key the reader does not know, and a mode whose command the binary does not implement.
+
+This is not a hypothetical risk being priced in. The unit fixture that was supposed to pin `docs/02-syntax.md` against the printer embedded a hand-corrected copy of the program rather than the documentation's bytes, and silently omitted two of its declarations; it passed for as long as it existed while the documentation it named was non-canonical. That is exactly this failure mode, in the codebase, found by reading rather than by a gate.
+
+*Consequence:* adding a field to the `--json` diagnostic schema is a deliberate change that breaks the runner until the reader is updated. That is the desired direction: the schema is pinned in [06-tooling.md](06-tooling.md#diagnostics), and a reader that tolerated unknown keys would let the schema drift from its specification silently.
+
+### D072
+**Diagnostics are compared as an exact multiset of `(code, severity, line, col, message)`, in both directions, with messages matched in full.** · locked
+
+An expected diagnostic that does not appear fails the file, and an unexpected one that appears fails it too. The symmetry is the point: a substring match on stderr would let a reworded message pass unnoticed, and the suite exists to make that a visible diff.
+
+**Order is deliberately not asserted.** Report order is a genuine guarantee that `diag_sink` provides for determinism, but it belongs to the sink, and requiring every spec file to mirror it would make each one brittle to a legitimate reordering of two independent checks inside one pass — churn in hundreds of files to restate a property one unit test already pins. The division of labour is that the spec suite settles *what* is reported and the unit tests over `diag_sink` settle the *ordering and mechanics* of reporting.
+
+*Rejected:* substring or regex matching on messages, which is what makes most compiler suites decorative; matching on code and position while ignoring the message, which would let the explanation rot while the tests stayed green, and the explanation is half of what [D038](#d038) promises.
+
+### D073
+**Positions in directives are the 1-based character columns that `--json` reports, and `expect-suggestion` carries a full range.** · locked
+
+Three different columns exist in this codebase and only one belongs in a directive: `span.start`/`span.end` are byte offsets, `span.col` is a character column counted by skipping UTF-8 continuation bytes, and the human caret is a display column with tabs expanded to four. Directives use `span.col`. Writing that down is worth a decision because an author who reads a column off the caret in a tab-indented file will produce a wrong number that looks right.
+
+`expect-suggestion` is a range — `3:36-3:41 -> "email"` — refining the start-only shorthand first sketched in [09-engineering.md](09-engineering.md#2-spec-tests--testsspec). A fix is a span plus a replacement, and an end that is wrong by a byte replaces the wrong text; a directive that cannot express the end cannot test what [D038](#d038) actually promises. An insertion is an empty range.
+
+*Consequence:* the runner converts `suggestion.replace_span` from byte offsets to line and column itself, duplicating about ten lines of `source_line_col`. That duplication is intended, for the reason in [D070](#d070); it is also the one place the runner reimplements compiler logic, so it is stated here rather than discovered in the diff.
+
+### D074
+**`expect-fmt-stable` formats a copy in a scratch directory, and requires the file to be diagnostic-free.** · locked
+
+`doot fmt` writes in place, so the runner copies the file into `build/<profile>/spec-tmp/` and formats the copy. **The test suite never writes to the repository**, and that holds by construction rather than by a cleanup step that a failing run can skip.
+
+Formatting a real file on disk also keeps the write path under test — the temporary plus `rename` in `fs_write_file`, which is what users actually hit.
+
+The second half is the subtle half. `doot fmt` leaves a file that did not parse byte for byte alone, so a file full of errors is trivially unchanged and would satisfy `expect-fmt-stable` while proving nothing at all. Pairing it with `expect-ok` is therefore required, and combining it with `expect-error` is a conflict the runner rejects: only a file with no diagnostics is known to have reached the printer.
+
+*Rejected:* `doot fmt --stdout`, which bypasses the write path the suite should be covering, and `doot fmt --check`, which reports a boolean where the suite wants the bytes. Both add permanent CLI surface whose only consumer is the test harness, and [D039](#d039)'s no-options posture is not a reason to be careless about the operational flags that do exist.
+
+### D075
+**`expect-output` asserts exact stdout with `--json` absent, in any mode, at the cost of a second invocation.** · locked
+
+Generalizes the run-only form in [09-engineering.md](09-engineering.md#2-spec-tests--testsspec). The runner collects diagnostics from `--json`, which occupies stdout, so a file that also pins human output needs a second run of the same command. The cost is paid only by files that ask for it, and process startup already dominates.
+
+The reason to want it beyond `doot run` is `doot fmt`'s summary. Its three outcomes — reformatted, already formatted, skipped — are the primary thing a user sees from the command, they were reported wrongly until recently, and nothing in the suite covered them: `--json` carries diagnostics only, so the summary is invisible to a runner that reads only JSON. A directive that pins stdout exactly is the cheapest honest fix.
+
+*Consequence:* human output becomes a tested interface for the commands that choose to pin it. That is a commitment, not an accident — it means rewording a summary line is a visible, deliberate diff.
+
+### D076
+**The binary under test is passed to the runner as an argument.** · locked
+
+`doot_spec <path-to-doot> [filter]`, supplied by the Makefile.
+
+It cannot be a compile-time path, because the sanitizer gate has to run the ASan `doot_spec` against the ASan `doot` while the ordinary `test` gate runs the debug pair — which binary is under test is a property of the invocation, not of the build. An environment variable would work and is worse: an invisible input that changes what the suite tested without changing the command that ran it. The filter argument mirrors `doot_test`'s.
+
+### D077
+**No per-test timeout. A hanging test is a budget bug.** · locked
+
+ISO C `system()` provides no portable way to bound a subprocess, and adding one would mean a platform shim in the test tooling before [v0.5](07-roadmap.md#v05--everywhere) needs one anywhere else — the same reasoning that chose `system()` over `popen` in [D066](#d066).
+
+The exposure is small and shrinking rather than accepted blindly. The modes that have files cannot loop: the lexer always advances and the parser is depth-bounded, both asserted continuously by `fuzz_lex` and `fuzz_parse`. When `run` mode gets files, a program that fails to terminate is a per-request budget failure ([D005](#d005)) — a runtime bug with a diagnostic, which is the mechanism that should catch it. A harness timer would convert that bug into a flaky test and hide it.
+
+*Consequence:* the CI job timeout is the only backstop until the VM lands, and that is sufficient for a suite whose commands are provably terminating.
+
+### D078
+**`tests/spec/` is organized by subject, and the accepting-and-rejecting pair for every well-formedness rule is mechanically enforced.** · locked
+
+Directories are the runner's reporting unit, so they name what is being specified — `lex/`, `parse/`, `markup/`, `fmt/`, `rules/`, `docs/` — rather than diagnostic number ranges, which would scatter one feature across several directories and tell a reader nothing.
+
+[D049](#d049) requires an accepting and a rejecting test for each of the sixteen well-formedness rules in [03-grammar.md](03-grammar.md#well-formedness-rules), and that has been an aspiration with no mechanism. Files in `rules/` are named `rule_NN_<slug>_ok.do` and `rule_NN_<slug>_err.do`, and `tools/check-docs.sh` reads the rule-to-code table in the grammar and requires both files for every rule whose codes are registered. Coverage grows as codes land, and the gate is honest today: it demands tests for the five rules the parser discharges and nothing for the eleven the semantic pass will own.
+
+*Consequence:* the grammar document gains an explicit rule-to-code column, because a gate cannot read a mapping that exists only as prose.
+
+### D079
+**A code that describes source text is proved by a spec test; a code that describes the driver's environment is proved by a unit test.** · locked
+
+This replaces the interim rule, which accepted a code named anywhere under `tests/` — correct while spec tests did not exist, and too loose afterwards, since it would let every future code satisfy [D049](#d049) with a unit test over an internal function.
+
+The line follows from what a code is *about*. Four codes cannot be elicited by any `.do` file and are allowlisted in the gate with a reason each: `DT0002` (source too large — a 64 MB fixture is not committable), `DT1001` (cannot read the file — a spec file is readable by definition), `DT1002` (cannot write it), and `DT1003` (cannot read the directory). Everything else is reachable from bytes, including invalid UTF-8 (`DT0001`) and an embedded NUL (`DT0003`), because a spec file is bytes and its leading directive block stays readable no matter what follows.
+
+*Rejected:* an open-ended "unit test also counts" escape, which is the version of this rule that decays; and moving the four driver codes out of the registry to dodge the question, which would leave `doot explain` unable to describe errors the CLI genuinely emits.
+
+### D080
+**A documented complete program is pinned to a spec test byte for byte, declared in the code fence.** · locked
+
+A fenced block that is a whole program names the file it is pinned to — ```` ```do spec=tests/spec/docs/chat.do ```` — and `tools/check-docs.sh` compares the block against that file with its leading directive block stripped. GitHub highlights on the first word of an info string and ignores the rest, so the marker is free.
+
+The hole this closes was real. [10-frontend.md](10-frontend.md#idempotence) calls formatting the documented chat application "the strongest single case" and says the assertion decides which side is wrong when the printer and the documentation disagree. It could not: the fixture held a hand-corrected copy rather than the documentation's bytes and silently dropped two declarations, so both `db` call sites in the documentation stayed non-canonical for as long as the test existed. A claim that a document and an implementation agree has to be checked against the document.
+
+Fragments stay unmarked and unchecked. A bare signature or a single expression cannot parse standalone, and inventing the surrounding context needed to make it checkable would test something the documentation does not say.
+
+*Consequence:* in v0.1 the chat program is pinned for byte-equality and for its exact diagnostic set — three `DT0046`s for `stream` and `send` — but not for formatting, since `doot fmt` refuses a file with errors. Its formatting stays covered by the unit test over the subset v0.1 accepts, and when `stream` lands in [v0.2](07-roadmap.md#v02--realtime) the spec file gains `expect-fmt-stable` and that unit test is deleted. A dated gap, recorded, rather than a forgotten one.

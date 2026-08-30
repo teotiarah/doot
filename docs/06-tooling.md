@@ -25,6 +25,20 @@ One binary. No toolchain to install, no package manager, no asset pipeline, no s
 
 Every command accepts `--json` for machine-readable output.
 
+### Exit codes
+
+Three, the same for every command:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | success, and no diagnostics were reported |
+| `1` | the command ran and reported diagnostics |
+| `2` | the command was used wrongly — unknown command, unknown option, bad arguments |
+
+The distinction between 1 and 2 is the one that matters to a caller: `1` means doot has something to say about your code, `2` means doot did not understand what you asked for. A script can therefore treat `2` as its own bug and `1` as a finding. The spec runner relies on exactly that split — it reports exit code `2` as a failure of the suite rather than of the file under test ([11-spec-tests.md](11-spec-tests.md#the-mode)).
+
+`doot fmt` returns `1` when it reports diagnostics even though it also formatted whatever it could, because a run that skipped a file did not fully succeed. Its stdout summary distinguishes the three outcomes — reformatted, already formatted, and skipped — and that summary is a pinned interface, tested exactly ([D075](01-decisions.md#d075)).
+
 ### `doot new`
 
 ```
