@@ -186,8 +186,16 @@ static slice comment_text(const printer *p, const lex_comment *c) {
 }
 
 /* Comments that belong above the construct starting at `offset`, each on its own
- * line, preserving a single blank line where the author left one. */
-static void pr_comments_before(printer *p, uint32_t offset) {
+ * line, preserving a single blank line where the author left one.
+ *
+ * Returns whether any comment was emitted. Callers need that to decide about the
+ * blank line between the comments and the construct itself: their own
+ * "is this the first item" guard exists to suppress a blank line at the very top
+ * of a file or immediately after a `{`, and once a comment has been printed
+ * neither of those situations still applies. */
+static bool pr_comments_before(printer *p, uint32_t offset) {
+  bool any = false;
+
   while (p->comment != NULL && p->comment->at.start < offset) {
     if (p->has_last_end && blank_line_between(p, p->last_end, p->comment->at.start)) {
       pr_nl(p);
@@ -196,7 +204,9 @@ static void pr_comments_before(printer *p, uint32_t offset) {
     pr_nl(p);
     mark_end(p, p->comment->at.end);
     p->comment = p->comment->next;
+    any = true;
   }
+  return any;
 }
 
 /* A comment sitting on the same source line as the construct just printed stays
@@ -1167,11 +1177,13 @@ static void pr_block(printer *p, const stmt_list *body) {
   pr_byte(p, '{');
   p->indent++;
   for (s = body->first; s != NULL; s = s->next) {
+    bool had_comment;
+
     /* Open the line first: a comment above a statement belongs on a line of its
      * own, not appended to whatever the previous line ended with. */
     pr_nl(p);
-    pr_comments_before(p, s->at.start);
-    if (s != body->first && blank_line_between(p, p->last_end, s->at.start)) {
+    had_comment = pr_comments_before(p, s->at.start);
+    if ((had_comment || s != body->first) && blank_line_between(p, p->last_end, s->at.start)) {
       pr_nl(p);
     }
     pr_stmt(p, s);
@@ -1435,9 +1447,12 @@ static void pr_decl(printer *p, const decl *d) {
     pr(p, "\" {");
     p->indent++;
     for (item = d->as.group.items.first; item != NULL; item = item->next) {
+      bool had_comment;
+
       pr_nl(p);
-      pr_comments_before(p, item->at.start);
-      if (item != d->as.group.items.first && blank_line_between(p, p->last_end, item->at.start)) {
+      had_comment = pr_comments_before(p, item->at.start);
+      if ((had_comment || item != d->as.group.items.first) &&
+          blank_line_between(p, p->last_end, item->at.start)) {
         pr_nl(p);
       }
       pr_decl(p, item);
@@ -1476,6 +1491,7 @@ slice fmt_unit(arena *a, const unit_ast *unit) {
 
   for (d = unit->decls.first; d != NULL; d = d->next) {
     uint32_t start = d->attrs.first != NULL ? d->attrs.first->at.start : d->at.start;
+    bool had_comment;
 
     /* End the previous declaration's line first: a comment between two
      * declarations belongs on a line of its own, not appended to the `}` above
@@ -1483,8 +1499,8 @@ slice fmt_unit(arena *a, const unit_ast *unit) {
     if (d != unit->decls.first) {
       pr_nl(&p);
     }
-    pr_comments_before(&p, start);
-    if (d != unit->decls.first && blank_line_between(&p, p.last_end, start)) {
+    had_comment = pr_comments_before(&p, start);
+    if ((had_comment || d != unit->decls.first) && blank_line_between(&p, p.last_end, start)) {
       /* Exactly one blank line where the author left one or more. */
       pr_nl(&p);
     }

@@ -552,11 +552,15 @@ static type_ref *parse_type(parser *p) {
 
   if (check(p, TOK_QUESTION)) {
     t->optional = true;
-    t->at = span_join(t->at, p->tok.at);
     advance(p);
-  } else {
-    t->at = span_join(t->at, p->tok.at);
   }
+  /* Widen to the last token actually consumed, never to the lookahead. Joining
+   * `p->tok` here swallowed the token after the type: for `type Id = int` the
+   * lookahead is the TOK_NEWLINE whose span covers the whole newline run (D060),
+   * so the alias's span reached the next declaration and `doot fmt` then saw no
+   * blank line to preserve between them. `int?` was unaffected only because that
+   * branch happened to join the `?` it was about to consume. */
+  t->at = span_join(t->at, p->prev_at);
   depth_leave(p);
   return t;
 }

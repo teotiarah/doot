@@ -758,6 +758,8 @@ Three different columns exist in this codebase and only one belongs in a directi
 
 `expect-suggestion` is a range — `3:36-3:41 -> "email"` — refining the start-only shorthand first sketched in [09-engineering.md](09-engineering.md#2-spec-tests--testsspec). A fix is a span plus a replacement, and an end that is wrong by a byte replaces the wrong text; a directive that cannot express the end cannot test what [D038](#d038) actually promises. An insertion is an empty range.
 
+*This decision originally required `at <line>:<col>` on every diagnostic expectation, and that is wrong: not every diagnostic has a position.* The source-intake codes — `DT0001`, `DT0002`, `DT0003` — are reported by `source_from_file` **before** the source object exists, so there is no line index to resolve an offset against, and `diag_render_json` correctly omits `file` and `span` for them; the offset appears in the message instead. `at <line>:<col>` is therefore **optional**, and `expect-error: DT0003 "<message>"` is the form for a diagnostic that carries no span. Requiring `at` would have made three registered codes inexpressible, and spelling them `at 0:0` would have asserted a position that does not exist. Found while writing the spec tests for those codes, which is the earliest point at which it could have been found.
+
 *Consequence:* the runner converts `suggestion.replace_span` from byte offsets to line and column itself, duplicating about ten lines of `source_line_col`. That duplication is intended, for the reason in [D070](#d070); it is also the one place the runner reimplements compiler logic, so it is stated here rather than discovered in the diff.
 
 ### D074

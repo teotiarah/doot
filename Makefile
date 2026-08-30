@@ -48,20 +48,25 @@ LIB_SRCS  := $(foreach d,$(LAYERS),$(wildcard src/$(d)/*.c))
 LIB_HDRS  := $(foreach d,$(LAYERS),$(wildcard src/$(d)/*.h))
 CLI_SRCS  := $(wildcard src/cli/*.c)
 TEST_SRCS := $(wildcard tests/unit/*.c)
+# The spec runner links nothing from src/ (D070), so it is its own single-file
+# program rather than another consumer of $(LIB_OBJS).
+SPEC_SRCS := tests/spec/spec_runner.c
 
 LIB_OBJS  := $(LIB_SRCS:%.c=$(OUT)/%.o)
 CLI_OBJS  := $(CLI_SRCS:%.c=$(OUT)/%.o)
 TEST_OBJS := $(TEST_SRCS:%.c=$(OUT)/%.o)
+SPEC_OBJS := $(SPEC_SRCS:%.c=$(OUT)/%.o)
 
 DOOT      := $(OUT)/doot
 DOOT_TEST := $(OUT)/doot_test
+DOOT_SPEC := $(OUT)/doot_spec
 
 FUZZ_SRCS    := $(wildcard fuzz/fuzz_*.c)
 FUZZ_TARGETS := $(patsubst fuzz/%.c,build/fuzz/%,$(FUZZ_SRCS))
 FUZZ_CC      ?= clang
 FUZZ_FLAGS   := $(STD) -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all
 
-FMT_FILES := $(LIB_SRCS) $(CLI_SRCS) $(TEST_SRCS) $(FUZZ_SRCS) \
+FMT_FILES := $(LIB_SRCS) $(CLI_SRCS) $(TEST_SRCS) $(SPEC_SRCS) $(FUZZ_SRCS) \
              $(LIB_HDRS) $(wildcard src/cli/*.h) $(wildcard tests/unit/*.h)
 
 # Style and analysis tools are pinned (D055). A formatter or analyzer that
@@ -74,8 +79,8 @@ CLANG_TIDY_VERSION   := 22.1.8
 CLANG_FORMAT ?= clang-format
 CLANG_TIDY   ?= clang-tidy
 
-.PHONY: all release debug asan test test-asan unity fuzz fuzz-smoke fmt fmt-check tidy \
-        tools-check docs check clean help
+.PHONY: all release debug asan test test-asan spec spec-asan unity fuzz fuzz-smoke fmt fmt-check \
+        tidy tools-check docs check clean help
 
 all: $(DOOT)
 
@@ -98,6 +103,10 @@ $(DOOT_TEST): $(LIB_OBJS) $(TEST_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
+$(DOOT_SPEC): $(SPEC_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
 $(OUT)/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -107,10 +116,20 @@ $(OUT)/%.o: %.c
 test: $(DOOT_TEST)
 	$(DOOT_TEST) $(FILTER)
 
+# The primary suite (D049). The binary under test is an argument rather than a
+# compiled-in path, so the sanitizer profile drives its own `doot` (D076).
+spec: $(DOOT_SPEC) $(DOOT)
+	$(DOOT_SPEC) $(DOOT) $(FILTER)
+
 test-asan:
 	@$(MAKE) --no-print-directory PROFILE=asan build/asan/doot_test
 	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 \
 	UBSAN_OPTIONS=print_stacktrace=1 build/asan/doot_test $(FILTER)
+
+spec-asan:
+	@$(MAKE) --no-print-directory PROFILE=asan build/asan/doot_spec build/asan/doot
+	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 \
+	UBSAN_OPTIONS=print_stacktrace=1 build/asan/doot_spec build/asan/doot $(FILTER)
 
 # ---- amalgamation --------------------------------------------------------
 # The gate that keeps D035 true: one translation unit, one command, no make.
@@ -172,6 +191,12 @@ fmt: tools-check
 fmt-check: tools-check
 	$(CLANG_FORMAT) --dry-run --Werror $(FMT_FILES)
 
+# Scoped to the shipped code, which is also why $(TEST_SRCS) is absent. The spec
+# runner in particular cannot be clean here and should not be: D066 requires it to
+# use system(), which bugprone-command-processor and cert-env33-c correctly flag,
+# and disabling those two would stop flagging system() in src/ where it genuinely
+# must never appear. The runner is covered by -Werror with the full warning set,
+# by ASan and UBSan through `spec-asan`, and by its own negative tests.
 tidy: tools-check
 	$(CLANG_TIDY) $(LIB_SRCS) $(CLI_SRCS) -- $(STD) $(DEFS)
 
@@ -191,7 +216,7 @@ print-%:
 # profiles, `check` built only debug, and -O2 enables warnings that -O0 does not.
 # A -Wmaybe-uninitialized error reached CI green-locally, which is exactly the
 # failure mode D055 exists to prevent.
-check: tools-check fmt-check tidy docs all release test unity test-asan
+check: tools-check fmt-check tidy docs all release test spec unity test-asan spec-asan
 	@echo "all checks passed"
 
 clean:
@@ -202,7 +227,9 @@ help:
 	@echo "  make               debug build            -> build/debug/doot"
 	@echo "  make release       optimized build        -> build/release/doot"
 	@echo "  make test          unit tests             (FILTER=name to narrow)"
+	@echo "  make spec          specification tests    (FILTER=path to narrow)"
 	@echo "  make test-asan     unit tests under ASan + UBSan + LSan"
+	@echo "  make spec-asan     spec tests under ASan + UBSan + LSan"
 	@echo "  make unity         amalgamate, then build it with \$$(CC) alone"
 	@echo "  make fuzz          build libFuzzer targets"
 	@echo "  make fuzz-smoke    short fuzz run + committed regressions"
@@ -214,4 +241,4 @@ help:
 	@echo "  make check         everything CI runs"
 	@echo "  make clean         remove build/"
 
--include $(LIB_OBJS:.o=.d) $(CLI_OBJS:.o=.d) $(TEST_OBJS:.o=.d)
+-include $(LIB_OBJS:.o=.d) $(CLI_OBJS:.o=.d) $(TEST_OBJS:.o=.d) $(SPEC_OBJS:.o=.d)

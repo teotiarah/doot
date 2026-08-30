@@ -10,7 +10,10 @@ Statements are newline-terminated. Comments are `//` to end of line and `/* */` 
 
 This is a full realtime chat app. Runnable as `doot run app.do`. No imports, no framework, no build step, no hand-written JavaScript, no `await`.
 
-```do
+The `spec=` marker pins this block to a specification test, byte for byte, so the
+program below cannot drift from what the compiler actually accepts ([D080](01-decisions.md#d080)).
+
+```do spec=tests/spec/docs/chat.do
 type Msg {
   id:   int
   room: str
