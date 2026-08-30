@@ -1135,3 +1135,358 @@ The chokepoints that serialize work regardless of how the stages are divided are
 *Consequence:* the vendored SQLite enters the build in the second milestone, which is where `tools/vendor.sh` installs its tree for the first time and the `unity` gate's command grows a second translation unit: `cc -O2 -o doot build/doot.c vendor/sqlite/sqlite3.c`. That does not weaken [D045](#d045) — the amalgamation is one file of *doot*, and SQLite's amalgamation is already one file of SQLite — and it cannot be folded in, because vendored code keeps its own warning flags ([D052](#d052)).
 
 *Consequence:* rule 15 is the one pending well-formedness rule with no spec tests in v0.1. `spawn` is `DT0046` until v0.2, and [D081](#d081)'s barrier means the resolver never runs on a program containing one, so its code is unreachable and therefore correctly unregistered until tasks land. A dated gap, recorded, rather than a forgotten one.
+
+
+---
+
+## Standard library API
+
+The API surface of the 26 modules that land in v0.1, argued here and specified in [13-stdlib-api.md](13-stdlib-api.md). These are the decisions that had to be settled before any standard-library code could be written — and before the compiler's module signature table could be filled in, which [D102](#d102) puts on the critical path for every checker.
+
+### D130
+**[13-stdlib-api.md](13-stdlib-api.md) is the normative standard-library reference; [04-stdlib.md](04-stdlib.md) remains the overview.** · locked
+
+The overview decides *which* modules exist, what each is for, and which release each lands in, and it argues the two that carry structural weight. It does not and should not carry a signature per member: the v0.1 surface is several hundred members, and a table of that size inside a document whose job is the shape of the library would bury the shape.
+
+Two consumers force the split. [D085](#d085) makes the standard library a compile-time signature table with a column per property — parameters, marks, type-argument slots, mutating, version — and that table cannot be generated from prose with parameter names and no types. And [D102](#d102) makes filling the table a workstream of its own, on the critical path for the resolver, the typechecker, and the schema checker alike, because no checker can be tested against a program that calls a module the table does not describe. A workstream needs one input document.
+
+*Rejected:* expanding [04-stdlib.md](04-stdlib.md) in place, which would make one document both the argument for a closed library and its reference manual, and would make every future signature change a diff against the prose that justifies the module's existence; *also rejected:* one document per module, which multiplies the anchor surface the `docs` gate has to check and puts the cross-cutting decisions — error origination, the fields-versus-methods rule, the blocking set — in no document at all.
+
+*Consequence:* the overview's abbreviated signatures are illustrations and are marked as such. Where the two documents disagree, the reference wins, and every disagreement found while writing it is listed in [13-stdlib-api.md](13-stdlib-api.md#corrections-to-the-overview) rather than silently corrected.
+
+### D131
+**An `Error` is constructed with a struct literal, and `Error` is the only prelude type that may be.** · locked
+
+```do
+return Error { kind: .validation, message: "a name is required" }
+return Error { kind: .internal, message: "loading failed", cause: err }
+```
+
+This is the entry point [12-semantics.md](12-semantics.md#originating-an-error) left owed. The checker-side rule is already settled — in a fallible function, `return e` accepts either the declared return type or `Error` — and what was missing was how the value comes into existence.
+
+**The answer was already determined; it had not been written down.** [D014](#d014) says `Error` carries a `kind`, a `message`, and a `cause` chain, which is a struct with three fields. A struct literal is how every struct value in doot is built. And the alternative spelling a reader would reach for first, `Error.new(…)`, is not available, because [D092](#d092) removed the static method form and made a member access on a type name resolve to an enum variant and to nothing else. So a literal is not merely the most convenient construction form, it is the only one the language has.
+
+Three details follow rather than being chosen. **`cause` is a field with a default of `nil`**, so wrapping is one field and a chain is ordinary optional-struct recursion, which [D087](#d087) explicitly permits. **The source location is captured from the span of the literal**, so it is not a field, there is nothing to write and nothing to forget, and the compiler fills it at the same point it decides the literal's type — the same move [D028](#d028) makes when it injects a CSRF token into a `<form>` it can see. **A literal naming `location` is `DT0222`**, an ordinary "this type has no such field".
+
+`Error` is the only literal-constructible prelude type. `Request`, `Response`, `redirect`, and `Upload` are handles on runtime state that a literal could put into an inconsistent shape, so each is produced by the members that produce it and refined by the methods it carries.
+
+*Rejected:* an `error` module with `error.new(kind, message)`. The module set is closed at thirty-eight ([04-stdlib.md](04-stdlib.md)), [D085](#d085) states that closure as a property the checker relies on, and a thirty-ninth module for one constructor would spend the closure on the smallest possible thing. *Also rejected:* an unqualified prelude function, `fail(kind, message)`. The prelude is types plus `redirect`; adding the language's only unqualified callable, shadowable by any local, to save eight characters over a literal is a poor trade against [D030](#d030)'s "everything else is fully qualified". *Also rejected:* a `wrap(err, kind, message)` member, which is a function whose entire body sets one field.
+
+*Consequence:* `DT0409` — an `Error` returned from a function that is not fallible — becomes reachable from user code in v0.1, which it would not have been if construction had waited.
+
+*Consequence:* a struct literal of a prelude type other than `Error` needs a diagnostic of its own, reserved as [`DT0233`] ([D150](#d150)).
+
+### D132
+**`ErrorKind` is a tag-only enum of thirteen variants, closed and complete at v0.1, including the variants only deferred modules produce.** · locked
+
+`validation`, `not_found`, `conflict`, `permission`, `timeout`, `unavailable`, `parse`, `range`, `io`, `unsupported`, `lagged`, `closed`, `internal`.
+
+The set has to be complete now, and that is forced rather than tidy. [D085](#d085) makes `ErrorKind`'s variant set closed and known at compile time, which is what makes `match err.kind { … }` with no `else` arm decidably exhaustive (`DT0420`). **So adding a variant in a later release would turn a compiling program into a non-compiling one** — a breaking change, which [07-roadmap.md](07-roadmap.md#the-release-model) forbids at every version. A closed enum that the standard library grows into is not additive.
+
+Three variants therefore exist for modules that do not land in v0.1: `lagged` for `topic`'s bounded-buffer overflow ([D026](#d026)), `closed` for `chan`, and `unsupported` for the platform and format refusals that `os` and `image` produce. This is the one part of the standard library that could not be specified module by module.
+
+The set is thirteen because each variant has to earn a `match` arm someone would actually write. `not_found` and `conflict` are in [D014](#d014)'s own example. `validation` is in [02-syntax.md](02-syntax.md#tests). `parse` and `range` are distinct because "this text is not a number" and "this number does not fit" have different fixes. `permission`, `timeout`, `unavailable`, and `io` are the four ways an operating system or a network refuses, and collapsing them would make a retry policy unwritable. `internal` is the catch-all that lets every other variant stay specific.
+
+*Rejected:* a `kind` that is a `str`, which needs no closed set and gives up exhaustiveness, the whole benefit [D014](#d014)'s single error type buys; *also rejected:* a per-module kind set, which is [D014](#d014)'s rejected `Result[T, E]` fragmentation wearing an enum; *also rejected:* fewer variants with detail pushed into `message`, which makes handling a string comparison.
+
+*Consequence:* `errors` in a module's failure table are stated per member in [13-stdlib-api.md](13-stdlib-api.md), because a variant with no producer is as much a defect as a producer with no variant.
+
+### D133
+**Six `db` members take a variadic tail. No other standard-library member does, and no user function can.** · locked
+
+`db.one`, `db.find`, `db.all`, `db.count`, `db.exec`, and — with a list rather than a tail — `db.batch` are the closed set. [03-grammar.md](03-grammar.md#declarations) has no variadic `param` form, so this is a property of the module signature table and of nothing else.
+
+The reason it is acceptable in exactly this place is that **the looseness is removed before the program runs.** A `db` call's SQL argument is a literal prepared at compile time ([D098](#d098)), so the placeholder count is known and an arity mismatch is `DT0144`, and every argument's type is checked for bindability as `DT0160`. A variadic tail elsewhere would be genuinely unchecked arity.
+
+The alternative was a list — `db.one[User](sql, [id, name])` — and it fails on types before it fails on taste: a list is homogeneous, so a query binding an `int` and a `str` would need `[any]` and a cast per argument, which is a cast on the most common call in a doot program and would defeat `DT0160` by erasing the types it checks.
+
+*Rejected:* a general variadic parameter form in the grammar, which is frozen ([D042](#d042)) and which would put unchecked arity into user code for the sake of six members; *also rejected:* fixed-arity overloads, `db.one1`, `db.one2`, which is what a language without variadics looks like when it pretends otherwise.
+
+*Consequence:* `path.join` takes `[str]` and `str.join` takes `[str]`, because the variadic set is closed and they are not in it. Both are usually called with a list anyway.
+
+### D134
+**A member that fails and yields nothing is written `-> ()!`, a notation of the module table rather than a type. The combination is not spellable in a doot declaration, and that gap is recorded rather than closed.** · locked
+
+`db.tx`, `fs.write`, and `Upload.save_to` all fail and have nothing to return. [03-grammar.md](03-grammar.md#declarations) says `return_type := "->" type fallible?`, the type is not optional, and there is no unit type — [D087](#d087) makes `TY_NONE` the *absence* of a return and explicitly not a value. So `fn f() -> ()!` does not parse and neither does `fn f() !`.
+
+The type system nevertheless has the combination and reaches it three ways: a lambda with no declared return type infers both its type and its fallibility ([D093](#d093)), and a `test` body and a `stream` body are both checked as fallible functions returning nothing ([12-semantics.md](12-semantics.md#with-lambdas-and-defer)). `db.tx(fn() { db.exec(…)! })!` — the transaction in [02-syntax.md](02-syntax.md#data-access) — is exactly that combination on both sides of the call. So the notation names something the checker already represents; what is missing is a written spelling in a declaration.
+
+**The gap is left open deliberately.** Closing it means editing frozen grammar, and the cost of the gap is small and bounded: a user function that fails and has nothing to return either returns something it has — the id it inserted, the count it wrote — or is restructured. It is recorded here so that it is a known limitation with a stated workaround rather than a discovery during implementation, and so that if v1.0 ever revisits the grammar it is on the list.
+
+*Rejected:* adding a unit type `()`, which puts a value into the language whose only purpose is to be returned and which [D087](#d087) argued against on its own terms; *also rejected:* making these members return `bool` or `int` so that the notation is unnecessary, which is a lie in the signature to satisfy a notation.
+
+*Consequence:* `-> ()!` appears in the module table and in [13-stdlib-api.md](13-stdlib-api.md), and never in a `.do` file.
+
+### D135
+**A type argument is written when it appears only in the result, and inferred from one designated argument otherwise.** · locked
+
+`db.all[User](sql, …)` and `json.decode[Config](text)` must be written, because nothing in the argument list determines `T`. `json.encode(u)`, `validate.errors(form)`, `list.repeat(0, 4)`, `test.eq(err.kind, .validation)`, and `xs.map(fn(u: User) => u.name)` are written without one, because in each case exactly one argument determines it, and the table records which.
+
+This is what makes the documented calls work as documented. [02-syntax.md](02-syntax.md#functions) writes `users.map(fn(u: User) => u.name)` with no type argument, and it checks because a lambda with declared parameter types and an undeclared return type is inferrable on its own ([D093](#d093)) — so `U` is read off the lambda's inferred return type rather than solved for. **No unification is introduced:** the designated argument is inferred first, the slot is bound from its type, and every remaining argument is then checked against a signature with no unknowns. That is one extra step in the call check and no new machinery, which matters because [D090](#d090) chose bidirectional checking specifically to avoid an inference engine.
+
+*Rejected:* requiring every type argument to be written, which would spell `users.map[str](…)` and contradict the documented example; *also rejected:* general inference over all arguments, which needs a solver and would let two arguments disagree about a slot in a way whose diagnostic names neither.
+
+*Consequence:* every type-argument slot in [13-stdlib-api.md](13-stdlib-api.md) states whether it is written or inferred and, if inferred, from which parameter. A slot whose designated argument does not satisfy the slot's constraint is [`DT0216`] ([D150](#d150)).
+
+### D136
+**A builtin member is a row in the module table, not a declaration, so rule 9 and [D092](#d092) do not reach it. A builtin field is a stored value; everything else is a method.** · locked
+
+[04-stdlib.md](04-stdlib.md#overview) says "`str` — string statics; methods live on `str` values", and the same split holds for `[T]`, `{K: V}`, `bytes`, `time.Time`, `time.Duration`, and every stdlib and prelude type with a receiver. That looks like it collides with two locked rules: [rule 9](03-grammar.md#well-formedness-rules) requires `self` as a method's first parameter, and [D092](#d092) says there is no static method form.
+
+There is no collision, because **both rules are about declarations in a `.do` file.** A builtin member has no declaration: the compiler resolves the member access against the receiver's type by consulting the table, and the emitter compiles the call to an opcode or a native call rather than to a doot function entry. Rule 9 governs what a user may write, and the table governs what already exists. The other direction of [D092](#d092) is what makes this safe rather than a loophole: **user code may not attach a method to a stdlib type** (`DT0107`), so the method set on `str` is closed, complete, and knowable from one document — which is [D016](#d016)'s "where is this method defined" answered without opening the project.
+
+The field-versus-method rule needs stating because [02-syntax.md](02-syntax.md#strings) writes `s.len` without parentheses and `s.upper()` with them, and a reader needs to know which way a new member goes. A **field** is a value the receiver stores and can return with no work: `s.len`, `s.char_count`, `xs.len`, `m.len`, `b.len`, `Error`'s three, and the handful on `url.Url`, `fs.Info`, `os.Output`, `Upload`, `Response`, and `redirect`. `char_count` is a field despite costing a walk to compute, because a `str` caches it — it is stored, not computed. Everything else takes parentheses.
+
+*Rejected:* declaring the builtin methods as doot source in a bundled prelude file, which would need `self` and would make the standard library shadowable, redeclarable, and visible to the resolver as ordinary user code; *also rejected:* making every builtin member a module function — `str.upper(s)` — which contradicts [04-stdlib.md](04-stdlib.md#overview)'s split and turns `s.trim().lower()` into `str.lower(str.trim(s))`.
+
+*Consequence:* the module table's rows are keyed by module *or* by receiver type, and the workstream that fills it needs both halves. That is stated in [13-stdlib-api.md](13-stdlib-api.md#what-the-module-table-takes-from-this-document) so it is a known shape rather than a mid-implementation discovery.
+
+### D137
+**An imperative name mutates the receiver in place and requires a `var` binding; a past participle returns a new value. Twelve members mutate, and they are all on `[T]` and `{K: V}`.** · locked
+
+`xs.sort()` mutates and `xs.sorted()` returns; `xs.reversed()` returns and there is no `xs.reverse()`, because nothing wanted it. The mutating set is `push`, `pop`, `insert`, `remove_at`, `extend`, `clear`, `sort`, and `sort_by` on `[T]`, and `set`, `remove`, `extend`, and `clear` on `{K: V}`.
+
+[D097](#d097) put a mutating column in the module table so that deep `let` is checkable rather than aspirational, and left its values to be decided per member. This is that decision, and the naming convention is what makes it readable at the call site: `let` plus an imperative name is `DT0303`, and the diagnostic can name the non-mutating spelling because the convention guarantees one exists where one is wanted.
+
+Two builtin types have mutating methods because two are containers a handler builds up as it goes, and [D008](#d008)'s argument applies to exactly those: a `var` local is uniquely owned, so `xs.push(x)` mutates in place and value semantics cost no copy. `str`, `bytes`, `html`, and every stdlib and prelude type carry no mutating member at all, so a `let` binding of any of them is unrestricted.
+
+*Rejected:* only the returning forms, which would make building a list in a loop allocate a new list per iteration and would waste the in-place mutation [D008](#d008) went out of its way to make sound; *also rejected:* only the mutating forms, which would force `var` on a binding that is never reassigned and train a reader to ignore the distinction; *also rejected:* a `!` or `_mut` suffix marking mutation, which is a third convention where English already has one.
+
+*Consequence:* `rand.shuffled` has no in-place pair, and that is the one deliberate incompleteness: an in-place shuffle would need a mutating `[T]` method whose only caller is one module, and a shuffle copies anyway.
+
+### D138
+**Unit suffixes are fields on `int`. Durations are `ns us ms s min h days weeks`; byte sizes are `kb mb gb`, in powers of 1024.** · locked
+
+`15.s`, `250.ms`, `2.h`, `7.days`, and `16.mb` are in [02-syntax.md](02-syntax.md#configuration) and [02-syntax.md](02-syntax.md#uploads), so the spellings are fixed and what remains is the complete set and the semantics.
+
+They are **fields, not calls**, which [02-syntax.md](02-syntax.md#configuration) gets slightly wrong when it calls them "ordinary method calls on `int`": `15.s` is `INT` `.` `IDENT` under [03-grammar.md](03-grammar.md#identifiers-and-literals), because `FLOAT` requires a digit after the point, and there are no parentheses. Under [D136](#d136)'s rule a field is a stored value, and a duration suffix computes a multiplication — so this is the one exception, and it is the right one: `15.s()` is worse to read, and every documented example is written without parentheses.
+
+**Byte sizes are powers of 1024**, because what they configure is a memory budget ([D005](#d005)) and a budget is counted in binary units; `16.mb` is `16777216`. **`min` rather than `m`** for minutes, because `m` beside `mb` and `ms` reads as a truncation of either. The mixture of short and long names is inherited from the documented examples rather than chosen, and keeping `2.h` was preferred to renaming it for consistency with `7.days`.
+
+*Rejected:* a `time.seconds(15)` family, which the documented examples already rule out; *also rejected:* decimal byte sizes, which would make `16.mb` a number no allocator uses.
+
+### D139
+**A map key is `int`, `bool`, `str`, `bytes`, or an enum. Map iteration is insertion order.** · locked
+
+`float` is excluded because `nan != nan` makes a float key unfindable and a rounded float key is a silent bug. A struct, list, or map key is excluded because hashing a container is a decision with no v0.1 consumer, and [D009](#d009)'s structural equality means the question would otherwise have to be answered for every user type. A key type outside the set is [`DT0217`] ([D150](#d150)), reported at the annotation.
+
+**Insertion order** for `keys()`, `values()`, and `for k, v in m`. A hash order that varied between runs would make a rendered page's output depend on the allocator, which makes a spec test's expected bytes unpinnable and makes a built query string uncacheable — and [D072](#d072) already pays a price to keep the compiler's output order deterministic. Insertion order costs a link per entry and buys reproducibility everywhere.
+
+*Rejected:* sorted iteration order, which imposes a comparison on every key type and is not what an author who built a map in a meaningful order wants; *also rejected:* unspecified order, which is what most languages do and which is how a program comes to depend on one accidentally.
+
+### D140
+**`log`'s field map is `{str: str}`, and a non-string field is written with interpolation.** · locked
+
+```do
+log.info("user created", {"user_id": "${u.id}"})
+```
+
+A map is homogeneous, so the alternative was `{str: any}`, and it is worse at exactly the call site that matters most. [D088](#d088) has no implicit widening to `any`, so every numeric field would be written `u.id as any` — a cast on the most common logging call in the language, on the type `any` that [02-syntax.md](02-syntax.md#types) describes as coming only from untyped JSON. `"${u.id}"` needs no cast, is the form [D096](#d096) already types, and produces the text both output formats were going to carry anyway.
+
+The cost is stated rather than hidden: a JSON log line carries `"user_id": "12"` and not `"user_id": 12`. That is what most log pipelines index, and a program that needs a numeric field in a structured sink is writing to `db` or to `metrics`, not to a log.
+
+*Rejected:* `{str: any}`, above; *also rejected:* a variadic key-value tail, which [D133](#d133) closes to `db`; *also rejected:* one member per arity, `log.info1`, `log.info2`, which is that rejection's usual consequence.
+
+*Consequence:* `log` has no configuration entry point at all — no `set_level`, no `configure` — because a level set at runtime is a mutable global whose value differs per worker, which is the failure [D008](#d008) exists to make unrepresentable. The level is the process's configuration ([D040](#d040)) and the format is `env.mode()`.
+
+### D141
+**In `math`, the `int` form takes the unsuffixed name and the `float` form takes a `_float` suffix. Every checked integer operation has a `checked_*` and a `wrap_*` companion.** · locked
+
+Every operator in doot is monomorphic ([12-semantics.md](12-semantics.md#operators)) and there is no overloading, so `abs`, `min`, `max`, and `clamp` need two names each. `int` takes the plain one because [D020](#d020) makes money an `int` and therefore makes `int` the common case in a web application. The choice between `abs_float` and `float_abs` is arbitrary; the suffix form was chosen because it sorts the two spellings of one operation together in a reference.
+
+The two integer-only families are the point of the module. **`wrap_add` and friends are what [D003](#d003) promised**: explicit wraparound for hashes and checksums, total, never faulting. **`checked_add` and friends are its complement**, returning `int?` where `+` would fault. Without them, [D003](#d003)'s checked arithmetic leaves a program that genuinely does not know whether a sum fits with a fault as its only outcome; with them, `else` handles it, and the fault stays where it belongs — on arithmetic the author believed could not overflow.
+
+*Rejected:* overloading `math.abs` on argument type, which is one special case in a monomorphic type system and would be the only one; *also rejected:* float-only members with `as` at the call site, which routes integer arithmetic through binary floating point and is exactly what [D088](#d088) refuses to do implicitly and [D020](#d020) refuses to do at all.
+
+*Consequence:* `math.abs` faults on the most negative `int`, because its magnitude is not an `int`. `math.checked_sub(0, n)` is how a program asks without faulting, which is the pattern the `checked_*` family exists for.
+
+### D142
+**JSON representability is one constraint, used by `json`, by a route's return type, and by `http.json_body`. Encoding is total and therefore not fallible.** · locked
+
+Representable: `int`, `float`, `bool`, `str`, an enum as its variant name, a struct declared in this program whose every field is representable, `[T]` and `{str: V}` of representable elements, `T?` as `null`, and `any` for encoding only. `bytes` and `html` are not.
+
+One constraint rather than three, because [02-syntax.md](02-syntax.md#return-types) already makes a struct return type a JSON response and `json.encode` already has to answer the same question; three separately-worded rules would drift, and the diagnostic would name a different reason depending on which one noticed.
+
+**`bytes` is excluded** because it has no agreed JSON spelling: choosing base64 silently would make `encode` and `decode` disagree with every consumer that chose hex, and a program that wants base64 writes `encode.base64` into a `str` field where the choice is visible. **`html` is excluded** because a JSON document is not a page, and putting escaped markup into an API response is the confusion the type exists to prevent.
+
+**Encoding cannot fail**, because the type argument is checked at compile time and nothing is left to refuse at runtime; a NaN or infinite `float` encodes as `null`, which is the only representable choice and is stated rather than discovered. A fallible encoder would put an `else` on every JSON response for a failure that cannot happen.
+
+Decoding is fallible in two ways that get different kinds: `parse` when the text is not JSON, `validation` when it is JSON of the wrong shape. **A field the struct does not declare is ignored**, which is deliberately the opposite of `db`'s `DT0146`: a database schema is inside the program and a remote document is not, so an API that adds a field must not break a client.
+
+*Rejected:* base64 `bytes` by convention, above; *also rejected:* a fallible `json.encode`, above; *also rejected:* refusing unknown fields on decode, which makes every upstream addition a breaking change for the doot side.
+
+### D143
+**`db` has one entry point per result shape: no `db.scalar`, no `db.last_insert_id`, a fallible `db.tx` body, and a nested `db.tx` is a savepoint.** · locked
+
+Four settlements, each removing a member or a case somebody would otherwise add later.
+
+**No `db.scalar[T]`.** `db.count` is the single-scalar entry point and its column is an integer (`DT0152`). A `str` or `float` scalar is a one-field struct, which names the column at the call site and goes through the same result-shape check as every other query. Two entry points for one shape is what [goal 1](00-vision.md#the-nine-goals) rules out.
+
+**No `db.last_insert_id`.** SQLite's `returning` clause is better in every case, it is already what the documented insert uses ([02-syntax.md](02-syntax.md#a-complete-application)), and a separate id read is a second round trip that can disagree with the first under concurrency.
+
+**`db.tx`'s body must be fallible** — its parameter is `fn() -> ()!`, and a body that cannot fail is `DT0207`. Function types compare structurally including their fallibility, so no widening is available ([D088](#d088)), and this is the right side of that: a transaction whose body cannot fail cannot roll back, so it is a `db.exec` with extra words. Every real body contains a `db` call and therefore a `!`.
+
+**A nested `db.tx` runs as a savepoint.** The inner one rolls back to its own savepoint and the outer transaction survives to decide what to do. The alternative — a fault on nesting — makes a function containing `db.tx` uncallable from another function containing `db.tx`, which is a whole-program property no local reading can establish and exactly the kind of hazard that only shows up in production.
+
+*Rejected:* each of the above's alternative in place; *also rejected:* a `db.tx` that takes an isolation level, which SQLite in WAL mode with one writer does not have a second choice for ([D032](#d032)).
+
+### D144
+**A handler that controls its status is declared `-> Response!`. `Request`, `Response`, `redirect`, and `Upload` are opaque, and a `Response` is refined by `with_*` methods that each return a new one.** · locked
+
+`html` is not `Response` and there is no widening ([D088](#d088)), so `route … -> html!` cannot `return http.not_found()`. That is a real constraint on how a handler is written, and stating it is better than the two ways of hiding it. A handler that always answers 200 keeps the simple return type; a handler that can answer 404 is declared `-> Response!` and wraps its page in `http.html(…)`.
+
+The four types are opaque because each is a handle on runtime state that a literal could put into an inconsistent shape — a `Response` with a body and a 204, an `Upload` with a size that does not match its bytes. [D131](#d131) makes `Error` the single exception, for the single reason that `Error` is a data structure with three fields and nothing else.
+
+`with_status`, `with_header`, `with_content_type`, and `with_cookie` each return a **new** `Response`, so a `let` binding of one is unrestricted and none of them appears in [D137](#d137)'s mutating set. That also makes them chainable, which is what a handler wants: `http.html(page).with_status(201).with_cookie(c)`.
+
+*Rejected:* implicit widening from `html` to `Response`, which is a row in [D088](#d088)'s closed table and would be the first implicit conversion in the language; *also rejected:* a mutable response object that a handler configures, which is a mutable binding threaded through every call and is what [D008](#d008) removed; *also rejected:* a `Response` struct literal, which would let a program build a response the server cannot send.
+
+*Consequence:* the response-side JSON builder is `http.json_body[T]` and not `http.json`, because [04-stdlib.md](04-stdlib.md#the-two-load-bearing-modules) gives `http.json[T](url)` to the v0.3 client and one module cannot have two members of one name. Given the collision, naming the new member around the documented one is what leaves the documentation alone.
+
+### D145
+**`html.attrs` is not a member. The `...expr` spread is that feature.** · locked
+
+[04-stdlib.md](04-stdlib.md#html) listed `html.attrs({str: str}) -> html`, and there is no position in the grammar that accepts an `html` value as an attribute. [03-grammar.md](03-grammar.md#markup) spells the feature `attr := … | "..." expr`, [D096](#d096) types it as `{str: str}` with `DT0264`, and the value it takes is the map — not an `html` wrapper around the map.
+
+So the member was a second spelling of an existing feature, and the second spelling was the unusable one. Removing it is not a reduction in capability: `<input name="email" ...extra/>` does everything `html.attrs` was listed for.
+
+*Rejected:* adding an attribute position that accepts `html`, which would need a value of type `html` to be spliced into a tag without escaping — the one place [D021](#d021)'s soundness argument has no story, since an `html` value was escaped for text and not for an attribute ([D096](#d096) refuses it explicitly).
+
+*Consequence:* found by reading every code block in [04-stdlib.md](04-stdlib.md) against the frozen grammar, which is the audit [D154](#d154) makes standing practice.
+
+### D146
+**`validate.check` takes the value alone. There is no rule value.** · locked
+
+[04-stdlib.md](04-stdlib.md#validate) listed `validate.check(value, rules) -> ()!`, and `rules` has no expressible type. A list of heterogeneous rules needs either payload-carrying enum variants, which [D018](#d018) defers past v1.0, or an interface, which [D016](#d016) rules out permanently. A `{str: str}` of rule names and arguments would be a string-typed DSL inside a statically typed language, checked at runtime, which is the opposite of what [D043](#d043) bought by making attributes a closed set.
+
+So validation has exactly two shapes and both are typeable: **declaratively**, `@` attributes on a struct's fields, run automatically during request binding ([D025](#d025)); and **imperatively**, `bool` predicates composed with `and`. `validate.check[T](value: T) -> ()!` and `validate.errors[T](value: T) -> {str: str}` are the same run of a type's attributes, one failing and one reporting, and the pair exists because both shapes are wanted — an error to propagate, and a map to re-render a form with.
+
+*Rejected:* a rule value, above; *also rejected:* only `errors`, which makes propagating a validation failure a hand-written `if` at every call; *also rejected:* only `check`, which loses the field-to-message map that [04-stdlib.md](04-stdlib.md#validate) argues is the whole point.
+
+### D147
+**Receiving a signal is the runtime's, not the program's. `os` exposes the `Signal` enum and `send_signal`, and nothing else.** · locked
+
+`interrupt` and `terminate` begin a graceful shutdown, `hangup` reloads, and none of it is interceptable from doot.
+
+A handler-registration entry point — `os.on_signal(sig, handler)` — is a runtime registration of a callback, which is the shape [D024](#d024) rejected for routes, and it is worse here: it stores a mutable per-worker binding ([D008](#d008)), and it lets a program defeat the graceful shutdown that a deploy and a hot reload both depend on ([05-runtime.md](05-runtime.md#hot-reload)). A signal is also process-wide while doot's unit of everything is a task, so there is no task for a handler to belong to.
+
+What a program legitimately needs on the shutdown path is cleanup, and `defer` already runs there ([12-semantics.md](12-semantics.md#with-lambdas-and-defer)). What it legitimately needs outbound is the ability to signal a process it started, which is `os.send_signal` beside `os.run`.
+
+*Rejected:* signal handler registration, above; *also rejected:* a third well-known hook, `fn on_shutdown()`, which would add language surface — a name the resolver must know and the route checker must typecheck — for a callback that `defer` already covers.
+
+*Consequence:* [04-stdlib.md](04-stdlib.md#overview)'s "signals" for `os` means the enum and the outbound half, which is stated in [13-stdlib-api.md](13-stdlib-api.md#os) so the table's row is not read as promising a handler.
+
+### D148
+**`rand` has no seed. Its generator state is the worker's and is not addressable from doot.** · locked
+
+A seed setter is a mutable global in everything but name: a value one call writes and every later call reads, per worker, so a program's behaviour would differ between one worker and sixteen — the exact construct [D008](#d008) makes impossible rather than documenting. The generator is seeded from the CSPRNG at worker start.
+
+The cost is that a test cannot make `rand` deterministic, and the answer is that a function whose result must be reproducible takes the random value as a parameter. That is a testability property rather than a limitation: it moves the nondeterminism to the caller, where a test supplies it and a handler calls `rand`.
+
+`crypto.random_int` is a separate member from `rand.int` for the same reason `crypto` is a separate module: one is for tokens and one is for jitter, and a program reaching for the wrong one should have to say so. `crypto.random_int` is rejection-sampled rather than reduced modulo, because modulo bias in a token generator is invisible and permanent.
+
+*Rejected:* `rand.seed(n)`, above; *also rejected:* an explicit generator value threaded through calls, which is correct, is what a pure language would do, and costs a parameter on every function in the call chain for a feature whose only consumer is a test.
+
+### D149
+**The blocking set is enumerated per member, and every member not in it is non-blocking as a commitment.** · locked
+
+`db` entirely; `fs` except `temp_dir`; `form` entirely; both `static` members; `os.run`; `test.fixture` and `test.fixture_text`; `Request.body` and `body_text`; `Upload.save_to`, `bytes`, and `text`; and `crypto`'s two password members in v0.4. Each is marked at its signature and all of them are collected in one table.
+
+[D006](#d006) says blocking work is offloaded so it never stalls the event loop, and that guarantee is only usable if a reader can tell which calls are which. Marking it per member — rather than per module, which would be wrong for `os` and `test` — makes the answer local to the call.
+
+The complement is the part that is a commitment rather than an observation: `time.now()`, `uuid.new()`, `crypto.random_bytes`, `log.info`, and every `str`, `list`, `map`, `math`, `json`, `encode`, `html`, `url`, `cookie`, `mime`, `path`, and `env` member completes on the loop with no hop. **`log` is the one worth naming**, because a logger that wrote synchronously to a file would make every log line a blocking call: log output goes to a worker buffer that the worker flushes, so `log.info` in a hot handler costs an append.
+
+*Rejected:* marking blocking per module, which is imprecise in both directions and would put `os.cpu_count` and `path.join` behind a pool hop in a reader's mind; *also rejected:* leaving it to the implementation, which is how a synchronous write ends up in a hot path and is not discovered until a benchmark.
+
+### D150
+**Three diagnostic numbers are reserved for the standard library's compile-time constraints: [`DT0216`], [`DT0217`], and [`DT0233`]. None is registered.** · locked
+
+| Code | Meaning |
+| --- | --- |
+| [`DT0216`] | a type does not satisfy the constraint on this entry point |
+| [`DT0217`] | this type cannot be a map key |
+| [`DT0233`] | this type cannot be constructed with a struct literal |
+
+All three sit in held sub-ranges [D100](#d100) already allocated — `DT0216` and `DT0217` in core type agreement, `DT0233` in named types — so the reservation costs nothing and collides with nothing. They are written in brackets, the form [03-grammar.md](03-grammar.md#well-formedness-rules) uses, and a row enters `src/base/diag_codes.h` only with the code that emits it and the spec test that proves it ([D065](#d065)).
+
+Three is the whole list, which is the interesting part: the module surface of 26 modules implies exactly three compile-time checks that are not already allocated. Argument counts and types are `DT0206` and `DT0207`; a mutating call on a `let` receiver is `DT0303`; an unlanded module or version is `DT0046`; every `db` check is `DT0140`–`DT0160`; an `Error` from a non-fallible function is `DT0409`. That is the dividend of specifying the library against a semantic pass that was allocated in full and in advance.
+
+`DT0216` is deliberately distinct from `DT0215`, which is about the *shape* of a type-argument list, and from `DT0153`, which is `db`'s own requirement that a row type be a struct declared in this program. One code per question, with the message naming the constraint and the type that failed it.
+
+*Rejected:* reusing `DT0200` for all three, which is the general type mismatch and whose message could not name a fix ([D038](#d038)); *also rejected:* registering them now, which would break the `docs` gate immediately ([D065](#d065)).
+
+### D151
+**A `test` assertion records a failure against the enclosing test task and returns nothing. Calling one outside a test is a fault.** · locked
+
+[02-syntax.md](02-syntax.md#tests) writes `test.eq(greet("Ada"), "hello Ada")` with no `!` and no `else`, so assertions are neither fallible nor optional-returning, and a test with several assertions reports all of their failures rather than stopping at the first.
+
+Outside a test task there is nothing to record against, and reaching an assertion from a request handler is a bug of exactly the kind [D012](#d012) describes — so it is a fault, and it needs no new diagnostic.
+
+The alternative was a compile-time rule that a `test` member may appear only lexically inside a `test` block, in the shape of [rules 10 and 11](03-grammar.md#well-formedness-rules), and a compile error is normally better than a runtime fault. It is rejected because it forbids a helper function that asserts — a legitimate and common shape — and because "reachable only from a test" is a whole-program analysis for a rule guarding nothing an author would get wrong by accident.
+
+*Rejected:* fallible assertions, `test.eq(…)!`, which would make every assertion propagate and stop a test at its first failure, and which the documented example rules out anyway; *also rejected:* the lexical rule, above.
+
+*Consequence:* `test.expect_error` **faults when its body succeeds**, rather than recording an ordinary failure: a test asserting that something fails has failed to test it, and a fault's diagnostic says more than an assertion's would.
+
+### D152
+**Time formatting is a closed set of sixteen `%` directives, English-only, and an unknown directive is a fault.** · locked
+
+`%Y %m %d %H %M %S %L %N %z %Z %a %A %b %B %p %%`, with `%Z` accepted by `format` and not by `parse`.
+
+A closed set rather than a pattern language, for the same reason [D043](#d043) closes the attribute set: the surface is bounded, a reader can hold it, and `doot doc --agent` can print all of it. **An unknown directive faults** because a format string is a literal in every real program, so an unknown directive is a typo in the source rather than a value from a request — and `format` therefore returns `str` rather than `str!`, which is what [04-stdlib.md](04-stdlib.md#time) already shows.
+
+**English only**, and that is a decision rather than an omission: a locale database is a large surface no other part of doot has, and a page that needs a translated month has a translation table of its own. **`%Z` is not accepted by `parse`** because a zone abbreviation is ambiguous — `CST` names three zones — and guessing would silently shift an instant by hours.
+
+Zones beyond `UTC` and `local` resolve against the platform's database and fail `not_found` when absent, which is why `time.zone_exists` is a member: a program that offers a user a list of zones needs to ask before it converts.
+
+*Rejected:* a Go-style reference-time layout (`2006-01-02`), which is memorable to people who already know it and inscrutable otherwise; *also rejected:* a fallible `format`, which puts an `else` on every rendered timestamp for a typo that a single test catches.
+
+### D153
+**`cookie.get_signed` returns `str?` and does not distinguish a tampered cookie from a missing one.** · locked
+
+Both are `nil`. An `Error` saying "signature invalid" would be an oracle: it tells an attacker that the name is right and only the signature is wrong, which is information a correct program never needs and an attacker always wants. No correct program branches differently on the two cases, because both mean "there is no trustworthy value here".
+
+The same posture applies to `crypto.decrypt`, which fails `validation` for a wrong key, a truncated message, and a tampered one alike.
+
+*Rejected:* `str?!` with a `validation` failure on a bad signature, above.
+
+*Consequence:* `cookie`'s defaults are the safe values — `path` `/`, `http_only` true, `same_site` `.lax`, `secure` true outside development — and each is overridable by a `with_*` method that says so in the source. A default that cannot be overridden gets worked around invisibly.
+
+### D154
+**A fenced ```do block is real doot; a signature listing is not marked `do`.** · locked
+
+*This is a practice rather than a language rule, and it exists because its absence produced a defect that stood in the documentation until the standard library was specified against the grammar.*
+
+[04-stdlib.md](04-stdlib.md#log) wrote `log.info("user created", { user_id: u.id })` inside a ```do block. It parses — `map_lit` is `"{" expr ":" expr … "}"`, so `user_id` is an identifier expression — and it means something other than what it appears to mean: a lookup of a local named `user_id`, which does not exist. The same block continued `log.warn(msg, fields) log.error(msg, fields)`, three calls juxtaposed on one line, which is not a statement at all. Two more blocks in the same document did the same thing.
+
+The rule, in the form that catches those:
+
+> A block marked `do` parses under [03-grammar.md](03-grammar.md), and every construct in it means what it appears to mean under the resolver's and typechecker's rules. A free identifier standing for a value the surrounding prose supplies is permitted; a construct whose *meaning changes* because a name is free is not.
+
+That is what separates `card(u)` in a fragment, which is fine, from `{ user_id: u.id }`, which is not. A listing of signatures is not doot in the first place — a standard-library member has no declaration to quote — so it goes in an unmarked fence, which also stops a reader from believing that `args: ...` and `-> ()!` are things they may write.
+
+*Rejected:* marking every block `do` and relying on review, which is what was in place; *also rejected:* pinning every block to a spec test, which [D080](#d080) already argues is wrong for fragments — inventing the surrounding context needed to make a signature checkable would test something the documentation does not say.
+
+*Consequence:* every code block in [04-stdlib.md](04-stdlib.md) was audited against the frozen grammar in this change, and the seven defects found are listed in [13-stdlib-api.md](13-stdlib-api.md#corrections-to-the-overview).
+
+### D155
+**`str.from_money(minor_units, decimals)` formats money, with no locale, no grouping, and no currency symbol.** · locked
+
+`str.from_money(1999, 2)` is `"19.99"` and `str.from_money(-5, 2)` is `"-0.05"`.
+
+[D020](#d020) makes money an `int` in minor units and promises "formatting helpers in `str`", and this is that helper. It takes the number of decimals rather than assuming two, because minor units are not always hundredths.
+
+What it deliberately does not do is the locale-dependent part: a thousands separator, a decimal comma, a currency symbol, and symbol placement are four decisions that vary by locale and by currency independently, and a wrong answer is a wrong price on a page. An application that needs them has a template of its own, and the number is already correct.
+
+*Rejected:* a locale parameter, which needs a locale database ([D152](#d152) rejects one for the same reason); *also rejected:* leaving money formatting to `str.from_float` and division, which reintroduces binary floating point at the last step of a calculation [D020](#d020) exists to keep out of it.
+
+### D156
+**No member of the standard library exposes a setter or returns a mutable view.** · locked
+
+The setters that were each individually plausible and are each individually absent: `log.set_level`, `rand.seed`, `env.set`, `db.set_busy_timeout`, and signal-handler registration. Every one is a value that one call writes and every later call reads, per worker, so a program's behaviour would differ between one worker and sixteen — which [D008](#d008) exists to make unrepresentable rather than to document. Everything they would configure is either the process's own configuration ([D040](#d040)) or a required argument at the call that needs it, which is why `static.file` takes a `max_age` rather than reading a module-level default.
+
+The second half is quieter and equally load-bearing. `m.keys()`, `m.values()`, `req.headers()`, and `form.values()` each return a **fresh** value, so mutating the result cannot reach back into what produced it. Without that, `let` would be deeply immutable in the language and shallowly immutable through the library, and both [D004](#d004)'s promote-by-deep-copy and [D008](#d008)'s "no aliasing anywhere" would be unsound in the same stroke — the guarantee would hold for assignment, be checked for mutating methods by [D097](#d097)'s column, and leak through every accessor that handed out a reference.
+
+*Rejected:* a per-worker configuration cell that reads as immutable, which is [D008](#d008)'s "explicitly per-worker `cache` cell" applied to something that is not a cache — a level or a timeout has one correct value for the process, so making it per-worker is wrong rather than merely surprising; *also rejected:* views for performance, which is a real cost paid in a language whose containers are packed ([05-runtime.md](05-runtime.md#containers-are-packed)) and copying a key list is a `memcpy`.
+
+*Consequence:* the mutating column in the module table has exactly twelve `true` rows ([D137](#d137)), and every one of them is a method on `[T]` or `{K: V}`.
