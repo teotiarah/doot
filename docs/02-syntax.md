@@ -27,7 +27,9 @@ fn layout(title: str, body: html) -> html {
 
 route GET "/rooms/:room" (room: str) -> html! {
   let msgs = db.all[Msg](
-    "select * from msgs where room = ? order by id desc limit 50", room)!
+    "select * from msgs where room = ? order by id desc limit 50",
+    room,
+  )!
 
   return layout(room, <div>
     <ul id="feed" data-live="/rooms/${room}/live">
@@ -49,7 +51,10 @@ type NewMsg {
 route POST "/rooms/:room" (room: str, form: NewMsg) -> redirect! {
   let m = db.one[Msg](
     "insert into msgs (room, body, at) values (?, ?, ?) returning *",
-    room, form.body, time.now())!
+    room,
+    form.body,
+    time.now(),
+  )!
 
   topic.publish("room:" + room, m)
   return http.see_other("/rooms/" + room)
